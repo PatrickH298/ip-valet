@@ -1,0 +1,13 @@
+version: 2
+updates:
+  # Workflow actions will be pinned to commit SHAs; this keeps the pins current.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Docker base images and Python dependencies are added here once the
+  # Dockerfiles and requirements files are in the repository.
