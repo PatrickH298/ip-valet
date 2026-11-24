@@ -45,7 +45,7 @@ type enforcedCounts struct {
 // impactScope says which entries a change can affect.
 type impactScope struct {
 	realm    string // rule change: every live, unexpired entry in the realm
-	targetID string // routing change: every entry the target matches before the change
+	workerID string // routing change: every entry the worker matches before the change
 }
 
 func newItem(e *state.Entry, effect, action string) impactItem {
@@ -141,13 +141,13 @@ func planRules(rs *rules.Set, entries []state.Entry, now time.Time) []impactItem
 	return items
 }
 
-// planRouting reports entries no target matches any more. They fail no rule,
+// planRouting reports entries no worker matches any more. They fail no rule,
 // so they stay, reading unrouted.
-func planRouting(targets []state.Target, entries []state.Entry) []impactItem {
+func planRouting(workers []state.Worker, entries []state.Entry) []impactItem {
 	var items []impactItem
 	for i := range entries {
 		e := &entries[i]
-		if !state.Routed(targets, e.Realm, e.User, e.Group, e.Prefix) {
+		if !state.Routed(workers, e.Realm, e.User, e.Group, e.Prefix) {
 			items = append(items, newItem(e, rules.EffectUnrouted, actionNone))
 		}
 	}
@@ -211,7 +211,7 @@ func (s *Server) withImpact(w http.ResponseWriter, r *http.Request, p *auth.Prin
 	// The entries the change can affect, as they are before it.
 	var (
 		entries []state.Entry // live and unexpired
-		held    []string      // routing change: every entry the target held, expired ones too
+		held    []string      // routing change: every entry the worker held, expired ones too
 	)
 	if sc.realm != "" {
 		entries, err = db.QueryEntries(ctx, tx, `SELECT `+db.EntryCols+` FROM entries e
@@ -219,7 +219,7 @@ func (s *Server) withImpact(w http.ResponseWriter, r *http.Request, p *auth.Prin
 			ORDER BY e.created_at, e.id`, sc.realm)
 	} else {
 		var all []state.Entry
-		all, err = db.EntriesHeldBy(ctx, tx, sc.targetID)
+		all, err = db.EntriesHeldBy(ctx, tx, sc.workerID)
 		for _, e := range all {
 			held = append(held, e.ID)
 			if !e.Ended(now) {
@@ -244,13 +244,13 @@ func (s *Server) withImpact(w http.ResponseWriter, r *http.Request, p *auth.Prin
 		}
 		impact = planRules(&rs, entries, now)
 	} else {
-		targets, err := db.LoadTargets(ctx, tx)
+		workers, err := db.LoadWorkers(ctx, tx)
 		if err != nil {
 			return err
 		}
-		impact = planRouting(targets, entries)
-		// The target must confirm removing what it no longer matches.
-		if _, err := db.RecordStoppedMatching(ctx, tx, sc.targetID, held, func() (int64, error) { return rev.Get(ctx) }); err != nil {
+		impact = planRouting(workers, entries)
+		// The worker must confirm removing what it no longer matches.
+		if _, err := db.RecordStoppedMatching(ctx, tx, sc.workerID, held, func() (int64, error) { return rev.Get(ctx) }); err != nil {
 			return err
 		}
 	}

@@ -33,7 +33,7 @@ CREATE TABLE client_realms (
   PRIMARY KEY (client_id, realm)
 );
 
-CREATE TABLE targets (
+CREATE TABLE workers (
   id                     uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name                   text NOT NULL UNIQUE,   -- admin handle
   label                  text NOT NULL,          -- the only field clients see
@@ -45,8 +45,8 @@ CREATE TABLE targets (
   last_seen_at           timestamptz,
   last_error             text,
   last_error_at          timestamptz,
-  last_worker_id         text,
-  last_worker_version    text,
+  last_instance          text,
+  last_version           text,
   created_at             timestamptz NOT NULL DEFAULT now(),
   updated_at             timestamptz NOT NULL DEFAULT now(),
   CHECK (ipv4 OR ipv6)
@@ -54,28 +54,28 @@ CREATE TABLE targets (
 
 CREATE TABLE subscriptions (
   id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  target_id  uuid NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+  worker_id  uuid NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   realm      realm_name REFERENCES realms(name) ON DELETE CASCADE,  -- NULL = *
   username   ident_name,                                            -- NULL = *
   grp        ident_name,                                            -- NULL = *
   created_at timestamptz NOT NULL DEFAULT now(),
-  UNIQUE NULLS NOT DISTINCT (target_id, realm, username, grp)
+  UNIQUE NULLS NOT DISTINCT (worker_id, realm, username, grp)
 );
 
 CREATE TABLE api_keys (
   id           text PRIMARY KEY CHECK (id ~ '^[a-z2-7]{16}$'),
   kind         text NOT NULL CHECK (kind IN ('admin', 'client', 'worker')),
   client_id    uuid REFERENCES clients(id) ON DELETE CASCADE,
-  target_id    uuid REFERENCES targets(id) ON DELETE CASCADE,
+  worker_id    uuid REFERENCES workers(id) ON DELETE CASCADE,
   name         text NOT NULL,
   secret_hash  bytea NOT NULL CHECK (octet_length(secret_hash) = 32),
   created_at   timestamptz NOT NULL DEFAULT now(),
   expires_at   timestamptz,
   revoked_at   timestamptz,
   last_used_at timestamptz,
-  CHECK ((kind = 'admin'  AND client_id IS NULL     AND target_id IS NULL)
-      OR (kind = 'client' AND client_id IS NOT NULL AND target_id IS NULL)
-      OR (kind = 'worker' AND target_id IS NOT NULL AND client_id IS NULL))
+  CHECK ((kind = 'admin'  AND client_id IS NULL     AND worker_id IS NULL)
+      OR (kind = 'client' AND client_id IS NOT NULL AND worker_id IS NULL)
+      OR (kind = 'worker' AND worker_id IS NOT NULL AND client_id IS NULL))
 );
 
 CREATE TABLE entries (
@@ -157,28 +157,28 @@ CREATE TABLE cap_rules (
   UNIQUE (realm, position) DEFERRABLE INITIALLY DEFERRED
 );
 
-CREATE TABLE target_rejections (
-  target_id uuid NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+CREATE TABLE worker_rejections (
+  worker_id uuid NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   prefix    cidr NOT NULL,
   code      text NOT NULL,
   detail    text,
   revision  bigint NOT NULL,
-  PRIMARY KEY (target_id, prefix)
+  PRIMARY KEY (worker_id, prefix)
 );
 
--- A target stops holding an entry when the entry is deleted, or when the
--- target stops matching it (a subscription is deleted, a family is dropped).
--- Each row records that moment: the target has removed the entry once its
+-- A worker stops holding an entry when the entry is deleted, or when the
+-- worker stops matching it (a subscription is deleted, a family is dropped).
+-- Each row records that moment: the worker has removed the entry once its
 -- applied_revision reaches `revision` (or, for an expired entry, once its
 -- applied_generated_at passes the expiry). Removal confirmation reads these
--- rows, so it does not depend on the target still matching the entry.
+-- rows, so it does not depend on the worker still matching the entry.
 CREATE TABLE entry_removals (
   entry_id  uuid   NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
-  target_id uuid   NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+  worker_id uuid   NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
   revision  bigint NOT NULL,
-  PRIMARY KEY (entry_id, target_id)
+  PRIMARY KEY (entry_id, worker_id)
 );
-CREATE INDEX entry_removals_target ON entry_removals (target_id);
+CREATE INDEX entry_removals_worker ON entry_removals (worker_id);
 
 CREATE TABLE audit_log (
   id          bigserial PRIMARY KEY,
@@ -200,7 +200,7 @@ CREATE INDEX audit_log_at ON audit_log (at);
 
 DROP TABLE audit_log;
 DROP TABLE entry_removals;
-DROP TABLE target_rejections;
+DROP TABLE worker_rejections;
 DROP TABLE cap_rules;
 DROP TABLE ttl_rules;
 DROP TABLE prefix_rules;
@@ -208,7 +208,7 @@ DROP TABLE ip_rules;
 DROP TABLE entries;
 DROP TABLE api_keys;
 DROP TABLE subscriptions;
-DROP TABLE targets;
+DROP TABLE workers;
 DROP TABLE client_realms;
 DROP TABLE clients;
 DROP TABLE realms;

@@ -108,8 +108,8 @@ func shadowWarnings(rows []ruleRow) []rules.Warning {
 	return rules.ShadowWarnings(items)
 }
 
-// ruleTarget validates the {realm} and {list} path values.
-func ruleTarget(ctx context.Context, q db.Querier, r *http.Request) (realm, list string, err error) {
+// ruleListPath validates the {realm} and {list} path values.
+func ruleListPath(ctx context.Context, q db.Querier, r *http.Request) (realm, list string, err error) {
 	realm, list = r.PathValue("realm"), r.PathValue("list")
 	if _, ok := ruleTables[list]; !ok {
 		return "", "", errNotFound
@@ -125,7 +125,7 @@ func (s *Server) listRules(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 		return err
 	}
 	ctx := r.Context()
-	realm, list, err := ruleTarget(ctx, s.Pool, r)
+	realm, list, err := ruleListPath(ctx, s.Pool, r)
 	if err != nil {
 		return err
 	}
@@ -358,7 +358,7 @@ func (s *Server) auditRule(ctx context.Context, tx pgx.Tx, p *auth.Principal, ac
 
 func (s *Server) createRule(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	ctx := r.Context()
-	realm, list, err := ruleTarget(ctx, s.Pool, r)
+	realm, list, err := ruleListPath(ctx, s.Pool, r)
 	if err != nil {
 		return err
 	}
@@ -408,7 +408,7 @@ func (s *Server) createRule(w http.ResponseWriter, r *http.Request, p *auth.Prin
 
 func (s *Server) patchRule(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	ctx := r.Context()
-	realm, list, err := ruleTarget(ctx, s.Pool, r)
+	realm, list, err := ruleListPath(ctx, s.Pool, r)
 	if err != nil {
 		return err
 	}
@@ -466,7 +466,7 @@ func (s *Server) patchRule(w http.ResponseWriter, r *http.Request, p *auth.Princ
 
 func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	ctx := r.Context()
-	realm, list, err := ruleTarget(ctx, s.Pool, r)
+	realm, list, err := ruleListPath(ctx, s.Pool, r)
 	if err != nil {
 		return err
 	}
@@ -504,7 +504,7 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request, p *auth.Prin
 
 func (s *Server) reorderRules(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	ctx := r.Context()
-	realm, list, err := ruleTarget(ctx, s.Pool, r)
+	realm, list, err := ruleListPath(ctx, s.Pool, r)
 	if err != nil {
 		return err
 	}

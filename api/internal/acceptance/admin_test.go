@@ -138,7 +138,7 @@ func TestImpactCheck(t *testing.T) {
 
 	// Deleting the only subscription leaves the realm's entries unrouted. They
 	// fail no rule, so they stay.
-	subs := h.Admin(200, "GET", "/v1/admin/targets/"+s.TargetID+"/subscriptions", nil)["items"].([]any)
+	subs := h.Admin(200, "GET", "/v1/admin/workers/"+s.WorkerID+"/subscriptions", nil)["items"].([]any)
 	subPath := "/v1/admin/subscriptions/" + subs[0].(map[string]any)["id"].(string)
 	r = h.Do("DELETE", subPath, h.AdminKey, nil)
 	if r.Status != 409 {
@@ -163,13 +163,13 @@ func TestImpactCheck(t *testing.T) {
 	}
 }
 
-func TestTargetFamilyChangeImpact(t *testing.T) {
+func TestWorkerFamilyChangeImpact(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	s := h.Basic("r")
 	v6 := firstEntryID(submitOK(h, s.ClientKey, sub("p", "2a00:1450::/64", "1d", "g")))
 	submitOK(h, s.ClientKey, sub("p", "8.8.8.8", "1d", "g"))
-	path := "/v1/admin/targets/" + s.TargetID
+	path := "/v1/admin/workers/" + s.WorkerID
 	if r := h.Do("PATCH", path, h.AdminKey, map[string]any{"ipv6": false}); r.Status != 409 {
 		t.Fatalf("family change: %d %s", r.Status, r.Body)
 	}
@@ -186,7 +186,7 @@ func TestTargetFamilyChangeImpact(t *testing.T) {
 	if h.Revision() != rev+1 || int64(out["subscriptions_revision"].(float64)) != rev+1 {
 		t.Fatalf("family change revision: %v", out)
 	}
-	// The target dropped the entry; it reads removing there until the worker confirms.
+	// The worker dropped the entry; it reads removing there until the worker confirms.
 	if st, per := entryState(h, v6); st != "unrouted" || per["home-r"] != "removing" {
 		t.Fatalf("v6 entry: %s %v", st, per)
 	}
@@ -195,7 +195,7 @@ func TestTargetFamilyChangeImpact(t *testing.T) {
 		t.Fatalf("v6 entry after the worker confirmed: %s %v", st, per)
 	}
 	if r := h.Do("DELETE", path, h.AdminKey, nil); r.Status != 409 {
-		t.Fatalf("target delete: %d", r.Status)
+		t.Fatalf("worker delete: %d", r.Status)
 	}
 	h.Admin(200, "DELETE", path+"?confirm=true", nil)
 }
@@ -207,7 +207,7 @@ func TestRealmDeletion(t *testing.T) {
 	// with the realm; wild subscribes to every realm and keeps matching.
 	s := h.Basic("doomed")
 	h.CreateRealm("kept")
-	wild := h.CreateTarget("wild", true, true)
+	wild := h.CreateWorker("wild", true, true)
 	h.Subscribe(wild, "*", "*", "*")
 	wk := h.WorkerKey(wild)
 	h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"realms": []string{"doomed", "kept"}})
@@ -237,8 +237,8 @@ func TestRealmDeletion(t *testing.T) {
 	if r := h.Do("GET", "/v1/admin/realms/doomed", h.AdminKey, nil); r.Status != 404 {
 		t.Errorf("realm still readable: %d", r.Status)
 	}
-	// Both targets held the entry; it is removing until each worker confirms,
-	// even on the target whose subscription went with the realm.
+	// Both workers held the entry; it is removing until each worker confirms,
+	// even on the worker whose subscription went with the realm.
 	if st, per := entryState(h, id); st != "removing" || per["home-doomed"] != "removing" || per["wild"] != "removing" {
 		t.Fatalf("after realm deletion: %s %v", st, per)
 	}
@@ -265,8 +265,8 @@ func TestRemovalAfterSubscriptionChanges(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	h.CreateRealm("r")
-	a := h.CreateTarget("alpha", true, true)
-	b := h.CreateTarget("beta", true, true)
+	a := h.CreateWorker("alpha", true, true)
+	b := h.CreateWorker("beta", true, true)
 	h.Subscribe(a, "r", "*", "*")
 	subB := h.Subscribe(b, "r", "*", "*")
 	key := h.ClientKey(h.CreateClient("web", "r"))
@@ -341,10 +341,10 @@ func TestAdminCRUD(t *testing.T) {
 	if r := h.Do("POST", "/v1/admin/clients", h.AdminKey, map[string]any{"name": "client-r", "realms": []string{"r"}}); r.Status != 409 {
 		t.Errorf("duplicate client: %d", r.Status)
 	}
-	if r := h.Do("POST", "/v1/admin/targets", h.AdminKey, map[string]any{"name": "home-r", "label": "x", "ipv4": true, "ipv6": false}); r.Status != 409 {
-		t.Errorf("duplicate target: %d", r.Status)
+	if r := h.Do("POST", "/v1/admin/workers", h.AdminKey, map[string]any{"name": "home-r", "label": "x", "ipv4": true, "ipv6": false}); r.Status != 409 {
+		t.Errorf("duplicate worker: %d", r.Status)
 	}
-	if r := h.Do("POST", "/v1/admin/targets/"+s.TargetID+"/subscriptions", h.AdminKey, map[string]any{"realm": "r", "user": "*", "group": "*"}); r.Status != 409 {
+	if r := h.Do("POST", "/v1/admin/workers/"+s.WorkerID+"/subscriptions", h.AdminKey, map[string]any{"realm": "r", "user": "*", "group": "*"}); r.Status != 409 {
 		t.Errorf("duplicate subscription: %d", r.Status)
 	}
 	// Validation.
@@ -356,7 +356,7 @@ func TestAdminCRUD(t *testing.T) {
 		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{}}},
 		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{"missing"}}},
 		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{"r"}, "user_allowlist": []string{"p"}}},
-		{"/v1/admin/targets", map[string]any{"name": "t", "label": "T", "ipv4": false, "ipv6": false}},
+		{"/v1/admin/workers", map[string]any{"name": "t", "label": "T", "ipv4": false, "ipv6": false}},
 		{"/v1/admin/keys", map[string]any{"kind": "worker", "name": "w"}},
 		{"/v1/admin/keys", map[string]any{"kind": "admin", "name": "a", "client_id": s.ClientID}},
 		{"/v1/admin/realms/r/rules/ip", map[string]any{"user": "*", "group": "*", "prefix": "1.2.3.0/24", "action": "maybe"}},
@@ -413,7 +413,7 @@ func TestAdminCRUD(t *testing.T) {
 	seen := map[string]bool{}
 	cursor := ""
 	for pages := 0; pages < 10; pages++ {
-		path := "/v1/admin/entries?user=pg&limit=2&target_id=" + s.TargetID
+		path := "/v1/admin/entries?user=pg&limit=2&worker_id=" + s.WorkerID
 		if cursor != "" {
 			path += "&cursor=" + cursor
 		}

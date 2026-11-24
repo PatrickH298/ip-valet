@@ -50,7 +50,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		if generatedAt, err = db.Now(ctx, tx); err != nil {
 			return err
 		}
-		err = tx.QueryRow(ctx, `SELECT ipv4, ipv6 FROM targets WHERE id = $1`, p.TargetID).Scan(&ipv4, &ipv6)
+		err = tx.QueryRow(ctx, `SELECT ipv4, ipv6 FROM workers WHERE id = $1`, p.WorkerID).Scan(&ipv4, &ipv6)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
@@ -67,12 +67,12 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 			  AND ((family(e.prefix) = 4 AND $2) OR (family(e.prefix) = 6 AND $3))
 			  AND EXISTS (
 			    SELECT 1 FROM subscriptions s
-			    WHERE s.target_id = $1
+			    WHERE s.worker_id = $1
 			      AND (s.realm    IS NULL OR s.realm    = e.realm)
 			      AND (s.username IS NULL OR s.username = e.username)
 			      AND (s.grp      IS NULL OR s.grp      = e.grp))
 			GROUP BY e.prefix
-			ORDER BY e.prefix`, p.TargetID, ipv4, ipv6)
+			ORDER BY e.prefix`, p.WorkerID, ipv4, ipv6)
 		if err != nil {
 			return err
 		}
@@ -135,7 +135,7 @@ type rejectedItem struct {
 }
 
 type statusRequest struct {
-	WorkerID    *string        `json:"worker_id"`
+	Instance    *string        `json:"instance"`
 	Version     *string        `json:"version"`
 	Revision    *int64         `json:"revision"`
 	GeneratedAt *string        `json:"generated_at"`
@@ -162,10 +162,10 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		return err
 	}
 	fe := fieldErrors{}
-	if req.WorkerID == nil {
-		fe.add("worker_id", "required")
-	} else if n := utf8.RuneCountInString(*req.WorkerID); n < 1 || n > 128 {
-		fe.add("worker_id", "must be 1 to 128 characters")
+	if req.Instance == nil {
+		fe.add("instance", "required")
+	} else if n := utf8.RuneCountInString(*req.Instance); n < 1 || n > 128 {
+		fe.add("instance", "must be 1 to 128 characters")
 	}
 	if req.Version != nil && utf8.RuneCountInString(*req.Version) > 64 {
 		fe.add("version", "must be at most 64 characters")
@@ -256,44 +256,44 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 			}
 		}
 		var appliedRev int64
-		err = tx.QueryRow(ctx, `SELECT applied_revision FROM targets WHERE id = $1 FOR UPDATE`, p.TargetID).Scan(&appliedRev)
+		err = tx.QueryRow(ctx, `SELECT applied_revision FROM workers WHERE id = $1 FOR UPDATE`, p.WorkerID).Scan(&appliedRev)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errNotFound
 		}
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE targets SET last_seen_at = now(), last_worker_id = $2, last_worker_version = $3
-			WHERE id = $1`, p.TargetID, *req.WorkerID, req.Version); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE workers SET last_seen_at = now(), last_instance = $2, last_version = $3
+			WHERE id = $1`, p.WorkerID, *req.Instance, req.Version); err != nil {
 			return err
 		}
 		applied = appliedRev
 		switch {
 		case req.Error != nil:
-			if _, err := tx.Exec(ctx, `UPDATE targets SET last_error = $2, last_error_at = now() WHERE id = $1`,
-				p.TargetID, *req.Error); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE workers SET last_error = $2, last_error_at = now() WHERE id = $1`,
+				p.WorkerID, *req.Error); err != nil {
 				return err
 			}
 		case *req.Revision >= appliedRev:
-			if _, err := tx.Exec(ctx, `UPDATE targets SET applied_revision = $2,
+			if _, err := tx.Exec(ctx, `UPDATE workers SET applied_revision = $2,
 				applied_generated_at = greatest(applied_generated_at, $3) WHERE id = $1`,
-				p.TargetID, *req.Revision, generatedAt); err != nil {
+				p.WorkerID, *req.Revision, generatedAt); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `DELETE FROM target_rejections WHERE target_id = $1`, p.TargetID); err != nil {
+			if _, err := tx.Exec(ctx, `DELETE FROM worker_rejections WHERE worker_id = $1`, p.WorkerID); err != nil {
 				return err
 			}
 			if len(rejPrefixes) > 0 {
 				if _, err := tx.Exec(ctx, `
-					INSERT INTO target_rejections (target_id, prefix, code, detail, revision)
+					INSERT INTO worker_rejections (worker_id, prefix, code, detail, revision)
 					SELECT $1, u.p, u.c, u.d, $5 FROM unnest($2::cidr[], $3::text[], $4::text[]) AS u(p, c, d)`,
-					p.TargetID, rejPrefixes, rejCodes, rejDetails, *req.Revision); err != nil {
+					p.WorkerID, rejPrefixes, rejCodes, rejDetails, *req.Revision); err != nil {
 					return err
 				}
 			}
 			applied = *req.Revision
 		}
-		return db.Notify(ctx, tx, db.ChannelStatus, p.TargetID)
+		return db.Notify(ctx, tx, db.ChannelStatus, p.WorkerID)
 	})
 	if err != nil {
 		return err
@@ -302,7 +302,7 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	if req.Error != nil {
 		kind = "error"
 	}
-	s.Log.Debug("status report", "target_id", p.TargetID, "worker_id", *req.WorkerID, "revision", *req.Revision,
+	s.Log.Debug("status report", "worker_id", p.WorkerID, "instance", *req.Instance, "revision", *req.Revision,
 		"kind", kind, "rejected", len(rejPrefixes), "applied_revision", applied)
 	writeJSON(w, http.StatusOK, statusResponse{AppliedRevision: applied})
 	return nil

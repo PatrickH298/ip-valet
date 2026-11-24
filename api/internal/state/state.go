@@ -1,4 +1,4 @@
-// Package state computes applied state (per entry, per target) and the
+// Package state computes applied state (per entry, per worker) and the
 // desired-state ETag. It is pure: callers load the rows.
 package state
 
@@ -13,7 +13,7 @@ import (
 	"github.com/PatrickH298/ip-valet/api/internal/rules"
 )
 
-// Overall and per-target states.
+// Overall and per-worker states.
 const (
 	Active   = "active"
 	Pending  = "pending"
@@ -29,7 +29,7 @@ const (
 var AllStates = []string{Active, Pending, Partial, Rejected, Unrouted, Removing, Removed, Expired}
 
 // Worker rejection codes accepted in status reports.
-var WorkerCodes = []string{"prefix_too_broad", "address_not_allowed", "family_unsupported", "target_full", "invalid"}
+var WorkerCodes = []string{"prefix_too_broad", "address_not_allowed", "family_unsupported", "capacity_exceeded", "invalid"}
 
 // Entry is one entries row.
 type Entry struct {
@@ -58,7 +58,7 @@ func (e *Entry) Ended(now time.Time) bool {
 // Subscription is one subscriptions row.
 type Subscription struct {
 	ID       string
-	TargetID string
+	WorkerID string
 	Realm    *string
 	User     *string
 	Group    *string
@@ -69,8 +69,8 @@ func (s *Subscription) Matches(realm, user, group string) bool {
 	return rules.Matches(s.Realm, s.User, s.Group, realm, user, group)
 }
 
-// Target is one targets row with its subscriptions.
-type Target struct {
+// Worker is one workers row with its subscriptions.
+type Worker struct {
 	ID                    string
 	Name                  string
 	Label                 string
@@ -83,16 +83,16 @@ type Target struct {
 	Subs                  []Subscription
 }
 
-// FamilyOK reports whether the target holds p's address family.
-func (t *Target) FamilyOK(p netip.Prefix) bool {
+// FamilyOK reports whether the worker applies p's address family.
+func (t *Worker) FamilyOK(p netip.Prefix) bool {
 	if p.Addr().Is4() {
 		return t.IPv4
 	}
 	return t.IPv6
 }
 
-// Routes reports whether the target applies an entry with these fields.
-func (t *Target) Routes(realm, user, group string, p netip.Prefix) bool {
+// Routes reports whether the worker applies an entry with these fields.
+func (t *Worker) Routes(realm, user, group string, p netip.Prefix) bool {
 	if !t.FamilyOK(p) {
 		return false
 	}
@@ -104,8 +104,8 @@ func (t *Target) Routes(realm, user, group string, p netip.Prefix) bool {
 	return false
 }
 
-// SortTargets orders targets by label, then id, for stable output.
-func SortTargets(ts []Target) {
+// SortWorkers orders workers by label, then id, for stable output.
+func SortWorkers(ts []Worker) {
 	sort.SliceStable(ts, func(i, j int) bool {
 		if ts[i].Label != ts[j].Label {
 			return ts[i].Label < ts[j].Label
@@ -114,10 +114,10 @@ func SortTargets(ts []Target) {
 	})
 }
 
-// Routed reports whether any target applies the entry.
-func Routed(targets []Target, realm, user, group string, p netip.Prefix) bool {
-	for i := range targets {
-		if targets[i].Routes(realm, user, group, p) {
+// Routed reports whether any worker applies the entry.
+func Routed(workers []Worker, realm, user, group string, p netip.Prefix) bool {
+	for i := range workers {
+		if workers[i].Routes(realm, user, group, p) {
 			return true
 		}
 	}
@@ -125,66 +125,66 @@ func Routed(targets []Target, realm, user, group string, p netip.Prefix) bool {
 }
 
 type rejKey struct {
-	target string
+	worker string
 	prefix netip.Prefix
 }
 
-// Rejections holds target_rejections rows.
+// Rejections holds worker_rejections rows.
 type Rejections map[rejKey]string
 
 // Add records a rejection.
-func (r Rejections) Add(targetID string, p netip.Prefix, code string) {
-	r[rejKey{targetID, p}] = code
+func (r Rejections) Add(workerID string, p netip.Prefix, code string) {
+	r[rejKey{workerID, p}] = code
 }
 
-// Code returns the rejection code for (target, prefix), if any.
-func (r Rejections) Code(targetID string, p netip.Prefix) (string, bool) {
-	c, ok := r[rejKey{targetID, p}]
+// Code returns the rejection code for (worker, prefix), if any.
+func (r Rejections) Code(workerID string, p netip.Prefix) (string, bool) {
+	c, ok := r[rejKey{workerID, p}]
 	return c, ok
 }
 
-// TargetState is an entry's state on one target.
-type TargetState struct {
-	Target *Target
+// WorkerState is an entry's state on one worker.
+type WorkerState struct {
+	Worker *Worker
 	State  string
 	Code   string // rejection code when State is rejected
 }
 
-// Removals holds entry_removals rows: entry id → target id → the revision
-// from which that target no longer holds the entry.
+// Removals holds entry_removals rows: entry id → worker id → the revision
+// from which that worker no longer holds the entry.
 type Removals map[string]map[string]int64
 
 // Add records a removal row.
-func (r Removals) Add(entryID, targetID string, rev int64) {
+func (r Removals) Add(entryID, workerID string, rev int64) {
 	m := r[entryID]
 	if m == nil {
 		m = map[string]int64{}
 		r[entryID] = m
 	}
-	m[targetID] = rev
+	m[workerID] = rev
 }
 
-// confirmedGone reports whether target t has removed entry e, given the
+// confirmedGone reports whether worker t has removed entry e, given the
 // revision from which t no longer holds it. An expired entry also leaves a
-// target once the target has applied a desired state generated after the
+// worker once it has applied a desired state generated after the
 // expiry, since expiry bumps no revision.
-func confirmedGone(e *Entry, t *Target, rev int64) bool {
+func confirmedGone(e *Entry, t *Worker, rev int64) bool {
 	if t.AppliedRevision >= rev {
 		return true
 	}
 	return e.ExpiresAt != nil && t.AppliedGeneratedAt != nil && !t.AppliedGeneratedAt.Before(*e.ExpiresAt)
 }
 
-// EntryState computes an entry's overall state and its per-target states.
-// targets must already be sorted with SortTargets.
+// EntryState computes an entry's overall state and its per-worker states.
+// workers must already be sorted with SortWorkers.
 //
-// A live entry is judged by the targets that match it now. An ended entry is
-// judged by every target that held it: for a deleted entry, the targets on
-// record in rem (written when it was deleted, or earlier when a target
-// stopped matching it); for an expired entry, the targets that match it now
-// plus those on record. A target that stopped matching a live entry is listed
+// A live entry is judged by the workers that match it now. An ended entry is
+// judged by every worker that held it: for a deleted entry, the workers on
+// record in rem (written when it was deleted, or earlier when a worker
+// stopped matching it); for an expired entry, the workers that match it now
+// plus those on record. A worker that stopped matching a live entry is listed
 // as removing until it confirms, without affecting the overall state.
-func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now time.Time) (string, []TargetState) {
+func EntryState(e *Entry, workers []Worker, rej Rejections, rem Removals, now time.Time) (string, []WorkerState) {
 	rows := rem[e.ID]
 
 	if e.Ended(now) {
@@ -193,9 +193,9 @@ func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now ti
 			final = Expired
 		}
 		overall := final
-		var per []TargetState
-		for i := range targets {
-			t := &targets[i]
+		var per []WorkerState
+		for i := range workers {
+			t := &workers[i]
 			rev, onRecord := rows[t.ID]
 			var gone bool
 			switch {
@@ -216,20 +216,20 @@ func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now ti
 				s = Removing
 				overall = Removing
 			}
-			per = append(per, TargetState{Target: t, State: s})
+			per = append(per, WorkerState{Worker: t, State: s})
 		}
 		return overall, per
 	}
 
 	var (
-		per                           []TargetState
+		per                           []WorkerState
 		nMatched, nPending, nRejected int
 	)
-	for i := range targets {
-		t := &targets[i]
+	for i := range workers {
+		t := &workers[i]
 		if !t.Routes(e.Realm, e.User, e.Group, e.Prefix) {
 			if rev, onRecord := rows[t.ID]; onRecord && !confirmedGone(e, t, rev) {
-				per = append(per, TargetState{Target: t, State: Removing})
+				per = append(per, WorkerState{Worker: t, State: Removing})
 			}
 			continue
 		}
@@ -237,13 +237,13 @@ func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now ti
 		need := max(e.Revision, t.SubscriptionsRevision)
 		switch code, rejected := rej.Code(t.ID, e.Prefix); {
 		case t.AppliedRevision < need:
-			per = append(per, TargetState{Target: t, State: Pending})
+			per = append(per, WorkerState{Worker: t, State: Pending})
 			nPending++
 		case rejected:
-			per = append(per, TargetState{Target: t, State: Rejected, Code: code})
+			per = append(per, WorkerState{Worker: t, State: Rejected, Code: code})
 			nRejected++
 		default:
-			per = append(per, TargetState{Target: t, State: Active})
+			per = append(per, WorkerState{Worker: t, State: Active})
 		}
 	}
 	switch {
@@ -260,7 +260,7 @@ func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now ti
 	}
 }
 
-// DesiredItem is one prefix in a target's desired state.
+// DesiredItem is one prefix in a worker's desired state.
 type DesiredItem struct {
 	Prefix    netip.Prefix
 	ExpiresAt *time.Time
@@ -272,7 +272,7 @@ func FormatTime(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 // FormatMicro renders a timestamp as RFC 3339 UTC with exactly six fractional digits.
 func FormatMicro(t time.Time) string { return t.UTC().Format("2006-01-02T15:04:05.000000Z07:00") }
 
-// Families returns the target's families as API strings.
+// Families returns the worker's families as API strings.
 func Families(ipv4, ipv6 bool) []string {
 	out := []string{}
 	if ipv4 {

@@ -15,7 +15,7 @@ import (
 	"github.com/PatrickH298/ip-valet/api/internal/rules"
 )
 
-type targetView struct {
+type workerView struct {
 	ID                    string  `json:"id"`
 	Name                  string  `json:"name"`
 	Label                 string  `json:"label"`
@@ -29,12 +29,12 @@ type targetView struct {
 	UpdatedAt             string  `json:"updated_at"`
 }
 
-const targetSelect = `SELECT id::text, name, label, ipv4, ipv6, applied_revision, applied_generated_at,
-	subscriptions_revision, last_seen_at, created_at, updated_at FROM targets`
+const workerSelect = `SELECT id::text, name, label, ipv4, ipv6, applied_revision, applied_generated_at,
+	subscriptions_revision, last_seen_at, created_at, updated_at FROM workers`
 
-func scanTarget(row pgx.Row) (targetView, error) {
+func scanWorker(row pgx.Row) (workerView, error) {
 	var (
-		v      targetView
+		v      workerView
 		ag, ls *time.Time
 		c, u   time.Time
 	)
@@ -44,11 +44,11 @@ func scanTarget(row pgx.Row) (targetView, error) {
 	return v, err
 }
 
-func getTargetView(ctx context.Context, q db.Querier, id string) (*targetView, error) {
+func getWorkerView(ctx context.Context, q db.Querier, id string) (*workerView, error) {
 	if !validUUID(id) {
 		return nil, errNotFound
 	}
-	v, err := scanTarget(q.QueryRow(ctx, targetSelect+` WHERE id = $1`, id))
+	v, err := scanWorker(q.QueryRow(ctx, workerSelect+` WHERE id = $1`, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -58,7 +58,7 @@ func getTargetView(ctx context.Context, q db.Querier, id string) (*targetView, e
 	return &v, nil
 }
 
-func (s *Server) listTargets(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
+func (s *Server) listWorkers(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
 	if err := checkQuery(r, "limit", "cursor"); err != nil {
 		return err
 	}
@@ -71,32 +71,32 @@ func (s *Server) listTargets(w http.ResponseWriter, r *http.Request, _ *auth.Pri
 	if err != nil {
 		return err
 	}
-	rows, err := s.Pool.Query(r.Context(), targetSelect+` WHERE NOT $1 OR name > $2 ORDER BY name LIMIT $3`,
+	rows, err := s.Pool.Query(r.Context(), workerSelect+` WHERE NOT $1 OR name > $2 ORDER BY name LIMIT $3`,
 		after, c.Name, page.limit+1)
 	if err != nil {
 		return err
 	}
-	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (targetView, error) { return scanTarget(row) })
+	items, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (workerView, error) { return scanWorker(row) })
 	if err != nil {
 		return err
 	}
-	resp := listResponse[targetView]{Items: items}
+	resp := listResponse[workerView]{Items: items}
 	if len(items) > page.limit {
 		resp.Items = items[:page.limit]
 		resp.NextCursor = encodeCursor(nameCursor{Name: resp.Items[page.limit-1].Name})
 	}
 	if resp.Items == nil {
-		resp.Items = []targetView{}
+		resp.Items = []workerView{}
 	}
 	writeJSON(w, http.StatusOK, resp)
 	return nil
 }
 
-func (s *Server) getTarget(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
+func (s *Server) getWorker(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
 	if err := checkQuery(r); err != nil {
 		return err
 	}
-	v, err := getTargetView(r.Context(), s.Pool, r.PathValue("id"))
+	v, err := getWorkerView(r.Context(), s.Pool, r.PathValue("id"))
 	if err != nil {
 		return err
 	}
@@ -104,20 +104,20 @@ func (s *Server) getTarget(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 	return nil
 }
 
-type targetFields struct {
+type workerFields struct {
 	name, label       string
 	ipv4, ipv6        bool
 	setName, setLabel bool
 	setIPv4, setIPv6  bool
 }
 
-func parseTargetFields(r *http.Request, create bool) (*targetFields, error) {
+func parseWorkerFields(r *http.Request, create bool) (*workerFields, error) {
 	m, err := decodeObject(r, "name", "label", "ipv4", "ipv6")
 	if err != nil {
 		return nil, err
 	}
 	fe := fieldErrors{}
-	f := &targetFields{}
+	f := &workerFields{}
 	if v, ok := rawString(fe, m, "name"); ok {
 		if !validLabel(v, 128) {
 			fe.add("name", "must be 1 to 128 characters without control characters")
@@ -158,11 +158,11 @@ func parseTargetFields(r *http.Request, create bool) (*targetFields, error) {
 	return f, nil
 }
 
-func (s *Server) createTarget(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
+func (s *Server) createWorker(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	if err := checkQuery(r); err != nil {
 		return err
 	}
-	f, err := parseTargetFields(r, true)
+	f, err := parseWorkerFields(r, true)
 	if err != nil {
 		return err
 	}
@@ -170,10 +170,10 @@ func (s *Server) createTarget(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		return invalid("ipv4", "at least one of ipv4 and ipv6 must be true")
 	}
 	ctx := r.Context()
-	var v *targetView
+	var v *workerView
 	err = db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
 		var id string
-		err := tx.QueryRow(ctx, `INSERT INTO targets (name, label, ipv4, ipv6) VALUES ($1, $2, $3, $4) RETURNING id::text`,
+		err := tx.QueryRow(ctx, `INSERT INTO workers (name, label, ipv4, ipv6) VALUES ($1, $2, $3, $4) RETURNING id::text`,
 			f.name, f.label, f.ipv4, f.ipv6).Scan(&id)
 		if db.IsUniqueViolation(err) {
 			return errConflict
@@ -181,10 +181,10 @@ func (s *Server) createTarget(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		if err != nil {
 			return err
 		}
-		if v, err = getTargetView(ctx, tx, id); err != nil {
+		if v, err = getWorkerView(ctx, tx, id); err != nil {
 			return err
 		}
-		return db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "target.create", ObjectType: "target",
+		return db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "worker.create", ObjectType: "worker",
 			ObjectID: id, Details: map[string]any{"name": f.name, "label": f.label, "ipv4": f.ipv4, "ipv6": f.ipv6}})
 	})
 	if err != nil {
@@ -193,24 +193,24 @@ func (s *Server) createTarget(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	return respondMutation(w, http.StatusCreated, v, nil)
 }
 
-func (s *Server) patchTarget(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
+func (s *Server) patchWorker(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	if _, err := parseImpactParams(r); err != nil {
 		return err
 	}
 	id := r.PathValue("id")
-	f, err := parseTargetFields(r, false)
+	f, err := parseWorkerFields(r, false)
 	if err != nil {
 		return err
 	}
 	ctx := r.Context()
-	old, err := getTargetView(ctx, s.Pool, id)
+	old, err := getWorkerView(ctx, s.Pool, id)
 	if err != nil {
 		return err
 	}
 	familyChange := (f.setIPv4 && f.ipv4 != old.IPv4) || (f.setIPv6 && f.ipv6 != old.IPv6)
 
-	apply := func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*targetView, error) {
-		cur, err := getTargetView(ctx, tx, id)
+	apply := func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*workerView, error) {
+		cur, err := getWorkerView(ctx, tx, id)
 		if err != nil {
 			return nil, err
 		}
@@ -224,7 +224,7 @@ func (s *Server) patchTarget(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		if !ipv4 && !ipv6 {
 			return nil, invalid("ipv4", "at least one of ipv4 and ipv6 must be true")
 		}
-		_, err = tx.Exec(ctx, `UPDATE targets SET
+		_, err = tx.Exec(ctx, `UPDATE workers SET
 			name = CASE WHEN $2 THEN $3 ELSE name END,
 			label = CASE WHEN $4 THEN $5 ELSE label END,
 			ipv4 = $6, ipv6 = $7, updated_at = now() WHERE id = $1`,
@@ -239,28 +239,28 @@ func (s *Server) patchTarget(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		if ipv4 != cur.IPv4 || ipv6 != cur.IPv6 {
 			if rev == nil {
 				return nil, &apiError{Status: http.StatusConflict, Code: "conflict",
-					Message: "the target changed concurrently; retry the request"}
+					Message: "the worker changed concurrently; retry the request"}
 			}
 			r, err := rev.Get(ctx)
 			if err != nil {
 				return nil, err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE targets SET subscriptions_revision = $2 WHERE id = $1`, id, r); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE workers SET subscriptions_revision = $2 WHERE id = $1`, id, r); err != nil {
 				return nil, err
 			}
 			details["revision"] = r
 		}
-		v, err := getTargetView(ctx, tx, id)
+		v, err := getWorkerView(ctx, tx, id)
 		if err != nil {
 			return nil, err
 		}
 		details["after"] = v
-		return v, db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "target.update", ObjectType: "target",
+		return v, db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "worker.update", ObjectType: "worker",
 			ObjectID: id, Details: details})
 	}
 
 	if familyChange {
-		return s.withImpact(w, r, p, impactScope{targetID: id}, func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*mutation, error) {
+		return s.withImpact(w, r, p, impactScope{workerID: id}, func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*mutation, error) {
 			v, err := apply(ctx, tx, rev)
 			if err != nil {
 				return nil, err
@@ -268,7 +268,7 @@ func (s *Server) patchTarget(w http.ResponseWriter, r *http.Request, p *auth.Pri
 			return &mutation{status: http.StatusOK, object: v}, nil
 		})
 	}
-	var v *targetView
+	var v *workerView
 	err = db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
 		var err error
 		v, err = apply(ctx, tx, nil)
@@ -280,21 +280,21 @@ func (s *Server) patchTarget(w http.ResponseWriter, r *http.Request, p *auth.Pri
 	return respondMutation(w, http.StatusOK, v, nil)
 }
 
-func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
+func (s *Server) deleteWorker(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	id := r.PathValue("id")
 	if !validUUID(id) {
 		return errNotFound
 	}
-	return s.withImpact(w, r, p, impactScope{targetID: id}, func(ctx context.Context, tx pgx.Tx, _ *db.Revision) (*mutation, error) {
-		v, err := getTargetView(ctx, tx, id)
+	return s.withImpact(w, r, p, impactScope{workerID: id}, func(ctx context.Context, tx pgx.Tx, _ *db.Revision) (*mutation, error) {
+		v, err := getWorkerView(ctx, tx, id)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM targets WHERE id = $1`, id); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM workers WHERE id = $1`, id); err != nil {
 			return nil, err
 		}
-		if err := db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "target.delete", ObjectType: "target",
-			ObjectID: id, Details: map[string]any{"target": v}}); err != nil {
+		if err := db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "worker.delete", ObjectType: "worker",
+			ObjectID: id, Details: map[string]any{"worker": v}}); err != nil {
 			return nil, err
 		}
 		return &mutation{status: http.StatusOK, object: v}, nil
@@ -305,14 +305,14 @@ func (s *Server) deleteTarget(w http.ResponseWriter, r *http.Request, p *auth.Pr
 
 type subscriptionView struct {
 	ID        string `json:"id"`
-	TargetID  string `json:"target_id"`
+	WorkerID  string `json:"worker_id"`
 	Realm     string `json:"realm"`
 	User      string `json:"user"`
 	Group     string `json:"group"`
 	CreatedAt string `json:"created_at"`
 }
 
-const subscriptionSelect = `SELECT id::text, target_id::text, realm::text, username::text, grp::text, created_at
+const subscriptionSelect = `SELECT id::text, worker_id::text, realm::text, username::text, grp::text, created_at
 	FROM subscriptions`
 
 func scanSubscription(row pgx.Row) (subscriptionView, error) {
@@ -321,7 +321,7 @@ func scanSubscription(row pgx.Row) (subscriptionView, error) {
 		r, u, g *string
 		c       time.Time
 	)
-	err := row.Scan(&v.ID, &v.TargetID, &r, &u, &g, &c)
+	err := row.Scan(&v.ID, &v.WorkerID, &r, &u, &g, &c)
 	v.Realm, v.User, v.Group, v.CreatedAt = rules.SelectorString(r), rules.SelectorString(u), rules.SelectorString(g), ts(c)
 	return v, err
 }
@@ -332,7 +332,7 @@ func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request, _ *au
 	}
 	ctx := r.Context()
 	id := r.PathValue("id")
-	if _, err := getTargetView(ctx, s.Pool, id); err != nil {
+	if _, err := getWorkerView(ctx, s.Pool, id); err != nil {
 		return err
 	}
 	page, err := parsePage(r)
@@ -347,7 +347,7 @@ func (s *Server) listSubscriptions(w http.ResponseWriter, r *http.Request, _ *au
 	if !after {
 		c.ID = "00000000-0000-0000-0000-000000000000"
 	}
-	rows, err := s.Pool.Query(ctx, subscriptionSelect+` WHERE target_id = $1 AND (NOT $2 OR (created_at, id) > ($3, $4::uuid))
+	rows, err := s.Pool.Query(ctx, subscriptionSelect+` WHERE worker_id = $1 AND (NOT $2 OR (created_at, id) > ($3, $4::uuid))
 		ORDER BY created_at, id LIMIT $5`, id, after, c.T, c.ID, page.limit+1)
 	if err != nil {
 		return err
@@ -374,8 +374,8 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, p *a
 	if err := checkQuery(r); err != nil {
 		return err
 	}
-	targetID := r.PathValue("id")
-	if !validUUID(targetID) {
+	workerID := r.PathValue("id")
+	if !validUUID(workerID) {
 		return errNotFound
 	}
 	m, err := decodeObject(r, "realm", "user", "group")
@@ -405,7 +405,7 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, p *a
 		if _, err := db.LockCounter(ctx, tx); err != nil {
 			return err
 		}
-		if _, err := getTargetView(ctx, tx, targetID); err != nil {
+		if _, err := getWorkerView(ctx, tx, workerID); err != nil {
 			return err
 		}
 		if realm != nil {
@@ -416,11 +416,11 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, p *a
 			}
 		}
 		var err error
-		v, err = scanSubscription(tx.QueryRow(ctx, `INSERT INTO subscriptions (target_id, realm, username, grp)
-			VALUES ($1, $2, $3, $4) RETURNING id::text, target_id::text, realm::text, username::text, grp::text, created_at`,
-			targetID, realm, user, group))
+		v, err = scanSubscription(tx.QueryRow(ctx, `INSERT INTO subscriptions (worker_id, realm, username, grp)
+			VALUES ($1, $2, $3, $4) RETURNING id::text, worker_id::text, realm::text, username::text, grp::text, created_at`,
+			workerID, realm, user, group))
 		if db.IsUniqueViolation(err) {
-			return &apiError{Status: http.StatusConflict, Code: "conflict", Message: "the target already has this subscription"}
+			return &apiError{Status: http.StatusConflict, Code: "conflict", Message: "the worker already has this subscription"}
 		}
 		if err != nil {
 			return err
@@ -429,7 +429,7 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, p *a
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE targets SET subscriptions_revision = $2 WHERE id = $1`, targetID, rev); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE workers SET subscriptions_revision = $2 WHERE id = $1`, workerID, rev); err != nil {
 			return err
 		}
 		if w := rules.CrossRealmWarning(v.ID, realm, user, group); w != nil {
@@ -437,7 +437,7 @@ func (s *Server) createSubscription(w http.ResponseWriter, r *http.Request, p *a
 		}
 		return db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "subscription.create", ObjectType: "subscription",
 			ObjectID: v.ID, Realm: realm, User: user, Group: group,
-			Details: map[string]any{"target_id": targetID, "revision": rev}})
+			Details: map[string]any{"worker_id": workerID, "revision": rev}})
 	})
 	if err != nil {
 		return err
@@ -457,9 +457,9 @@ func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request, p *a
 	if err != nil {
 		return err
 	}
-	return s.withImpact(w, r, p, impactScope{targetID: sub.TargetID}, func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*mutation, error) {
+	return s.withImpact(w, r, p, impactScope{workerID: sub.WorkerID}, func(ctx context.Context, tx pgx.Tx, rev *db.Revision) (*mutation, error) {
 		v, err := scanSubscription(tx.QueryRow(ctx, `DELETE FROM subscriptions WHERE id = $1
-			RETURNING id::text, target_id::text, realm::text, username::text, grp::text, created_at`, id))
+			RETURNING id::text, worker_id::text, realm::text, username::text, grp::text, created_at`, id))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, errNotFound
 		}
@@ -470,11 +470,11 @@ func (s *Server) deleteSubscription(w http.ResponseWriter, r *http.Request, p *a
 		if err != nil {
 			return nil, err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE targets SET subscriptions_revision = $2 WHERE id = $1`, v.TargetID, rv); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE workers SET subscriptions_revision = $2 WHERE id = $1`, v.WorkerID, rv); err != nil {
 			return nil, err
 		}
 		if err := db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "subscription.delete", ObjectType: "subscription",
-			ObjectID: id, Details: map[string]any{"target_id": v.TargetID, "realm": v.Realm, "user": v.User,
+			ObjectID: id, Details: map[string]any{"worker_id": v.WorkerID, "realm": v.Realm, "user": v.User,
 				"group": v.Group, "revision": rv}}); err != nil {
 			return nil, err
 		}
@@ -491,8 +491,8 @@ type rejectionView struct {
 	Revision int64   `json:"revision"`
 }
 
-type targetHealthView struct {
-	TargetID           string          `json:"target_id"`
+type workerHealthView struct {
+	WorkerID           string          `json:"worker_id"`
 	Name               string          `json:"name"`
 	Label              string          `json:"label"`
 	AppliedRevision    int64           `json:"applied_revision"`
@@ -502,19 +502,19 @@ type targetHealthView struct {
 	LastSeenAt         *string         `json:"last_seen_at"`
 	LastError          *string         `json:"last_error"`
 	LastErrorAt        *string         `json:"last_error_at"`
-	LastWorkerID       *string         `json:"last_worker_id"`
-	LastWorkerVersion  *string         `json:"last_worker_version"`
+	LastInstance       *string         `json:"last_instance"`
+	LastVersion        *string         `json:"last_version"`
 	WorkerStreams      int             `json:"worker_streams"`
 	Rejections         []rejectionView `json:"rejections"`
 }
 
 type healthResponse struct {
 	Revision int64              `json:"revision"`
-	Targets  []targetHealthView `json:"targets"`
+	Workers  []workerHealthView `json:"workers"`
 }
 
-func (s *Server) loadHealth(ctx context.Context, targetID string) (*healthResponse, error) {
-	out := &healthResponse{Targets: []targetHealthView{}}
+func (s *Server) loadHealth(ctx context.Context, workerID string) (*healthResponse, error) {
+	out := &healthResponse{Workers: []workerHealthView{}}
 	streams := s.Hub.WorkerStreams()
 	err := db.InTx(ctx, s.Pool, db.SnapshotRead, func(tx pgx.Tx) error {
 		var err error
@@ -522,11 +522,11 @@ func (s *Server) loadHealth(ctx context.Context, targetID string) (*healthRespon
 			return err
 		}
 		sql := `SELECT id::text, name, label, applied_revision, applied_generated_at, last_seen_at, last_error,
-			last_error_at, last_worker_id, last_worker_version FROM targets`
+			last_error_at, last_instance, last_version FROM workers`
 		var args []any
-		if targetID != "" {
+		if workerID != "" {
 			sql += ` WHERE id = $1`
-			args = append(args, targetID)
+			args = append(args, workerID)
 		}
 		sql += ` ORDER BY name`
 		rows, err := tx.Query(ctx, sql, args...)
@@ -536,31 +536,31 @@ func (s *Server) loadHealth(ctx context.Context, targetID string) (*healthRespon
 		idx := map[string]int{}
 		for rows.Next() {
 			var (
-				h          targetHealthView
+				h          workerHealthView
 				ag, ls, le *time.Time
 			)
-			if err := rows.Scan(&h.TargetID, &h.Name, &h.Label, &h.AppliedRevision, &ag, &ls, &h.LastError, &le,
-				&h.LastWorkerID, &h.LastWorkerVersion); err != nil {
+			if err := rows.Scan(&h.WorkerID, &h.Name, &h.Label, &h.AppliedRevision, &ag, &ls, &h.LastError, &le,
+				&h.LastInstance, &h.LastVersion); err != nil {
 				rows.Close()
 				return err
 			}
 			h.AppliedGeneratedAt, h.LastSeenAt, h.LastErrorAt = tsPtr(ag), tsPtr(ls), tsPtr(le)
 			h.Revision = out.Revision
 			h.Lag = out.Revision - h.AppliedRevision
-			h.WorkerStreams = streams[h.TargetID]
+			h.WorkerStreams = streams[h.WorkerID]
 			h.Rejections = []rejectionView{}
-			idx[h.TargetID] = len(out.Targets)
-			out.Targets = append(out.Targets, h)
+			idx[h.WorkerID] = len(out.Workers)
+			out.Workers = append(out.Workers, h)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		sql = `SELECT target_id::text, prefix, code, detail, revision FROM target_rejections`
-		if targetID != "" {
-			sql += ` WHERE target_id = $1`
+		sql = `SELECT worker_id::text, prefix, code, detail, revision FROM worker_rejections`
+		if workerID != "" {
+			sql += ` WHERE worker_id = $1`
 		}
-		sql += ` ORDER BY target_id, prefix`
+		sql += ` ORDER BY worker_id, prefix`
 		rows, err = tx.Query(ctx, sql, args...)
 		if err != nil {
 			return err
@@ -577,7 +577,7 @@ func (s *Server) loadHealth(ctx context.Context, targetID string) (*healthRespon
 			}
 			rv.Prefix = pfx.String()
 			if i, ok := idx[tid]; ok {
-				out.Targets[i].Rejections = append(out.Targets[i].Rejections, rv)
+				out.Workers[i].Rejections = append(out.Workers[i].Rejections, rv)
 			}
 		}
 		return rows.Err()
@@ -585,7 +585,7 @@ func (s *Server) loadHealth(ctx context.Context, targetID string) (*healthRespon
 	return out, err
 }
 
-func (s *Server) targetHealth(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
+func (s *Server) workerHealth(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
 	if err := checkQuery(r); err != nil {
 		return err
 	}
@@ -597,10 +597,10 @@ func (s *Server) targetHealth(w http.ResponseWriter, r *http.Request, _ *auth.Pr
 	if err != nil {
 		return err
 	}
-	if len(h.Targets) == 0 {
+	if len(h.Workers) == 0 {
 		return errNotFound
 	}
-	writeJSON(w, http.StatusOK, h.Targets[0])
+	writeJSON(w, http.StatusOK, h.Workers[0])
 	return nil
 }
 

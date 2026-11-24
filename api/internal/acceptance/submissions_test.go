@@ -14,7 +14,7 @@ func TestNoSubscriberFailsWholeSubmission(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	h.CreateRealm("authentik")
-	tid := h.CreateTarget("v4only", true, false)
+	tid := h.CreateWorker("v4only", true, false)
 	h.Subscribe(tid, "authentik", "*", "fwusers")
 	key := h.ClientKey(h.CreateClient("web", "authentik"))
 	before := h.Revision()
@@ -23,7 +23,7 @@ func TestNoSubscriberFailsWholeSubmission(t *testing.T) {
 	if res["fwusers"]["ok"] != true || res["guests"]["code"] != "no_subscriber" {
 		t.Fatalf("results = %v", res)
 	}
-	// Family mismatch: the only matching target is IPv4-only.
+	// Family mismatch: the only matching worker is IPv4-only.
 	res = results(t, h.Submit(key, sub("patrick", "2a00:1450::/64", "1d", "fwusers")))
 	if res["fwusers"]["code"] != "no_subscriber" {
 		t.Fatalf("family mismatch: %v", res)

@@ -15,6 +15,16 @@ info:
     malformed, unknown, revoked or expired key is `401 unauthenticated`; a key
     of the wrong kind is `403 forbidden`.
 
+    **Workers.** An admin registers each worker with a name, a label (the
+    only worker field clients see), the address families it applies and its
+    subscriptions: (realm, user, group) selectors, each a name or `*`. An
+    entry is routed to every worker that applies its family and has a
+    subscription matching it. A worker key is bound to one worker; the
+    worker reads only its own desired state (prefixes and expiries, never who
+    registered them) and reports back which revision it has applied. Where a
+    worker applies its list, such as a firewall, is up to the worker; the API
+    has no notion of it.
+
     **Conventions.** JSON in and out, UTF-8, `snake_case` fields. A wildcard
     selector field is the string `"*"`. Timestamps are RFC 3339 in UTC.
     Durations use the TTL syntax: a positive integer with unit `s`, `m`, `h`
@@ -29,7 +39,7 @@ info:
     added in later versions; a code's meaning never changes.
 
     **The impact check.** Rule changes of any kind, subscription deletion,
-    target deletion and target family changes work out what they do to
+    worker deletion and worker family changes work out what they do to
     existing live, unexpired entries. No entry is ever left failing a rule:
 
     - IP or prefix rule now rejects it: the entry is removed.
@@ -38,7 +48,7 @@ info:
       are removed.
     - Over a TTL rule (lifetime left longer than the max, or unlimited under a
       finite max): the entry is shortened to now plus the max.
-    - No target matches it any more (routing changes): it fails no rule, so it
+    - No worker matches it any more (routing changes): it fails no rule, so it
       stays, reading `unrouted`.
 
     With `dry_run=true` the change is applied and rolled back and the response
@@ -47,10 +57,10 @@ info:
     change and every action are saved in one transaction with at most one
     revision bump.
 
-    **Removal.** When an entry is deleted, or a target stops matching it, the
-    server records which targets held it. The entry reads `removing` until
+    **Removal.** When an entry is deleted, or a worker stops matching it, the
+    server records which workers held it. The entry reads `removing` until
     each of them confirms by applying a later revision (or, for an expired
-    entry, a desired state generated after the expiry), even if the target no
+    entry, a desired state generated after the expiry), even if the worker no
     longer matches it.
   license:
     name: AGPL-3.0-only
@@ -62,7 +72,7 @@ tags:
   - name: client
     description: Submit and manage entries; read their applied state. Client keys.
   - name: worker
-    description: Fetch a target's desired state, receive change signals, report status. Worker keys.
+    description: Fetch a worker's desired state, receive change signals, report status. Worker keys.
   - name: admin
     description: Configuration, entries, health and audit. Admin keys.
   - name: health
@@ -328,16 +338,16 @@ paths:
     get:
       tags: [worker]
       operationId: getDesiredState
-      summary: The target's desired state
+      summary: The worker's desired state
       description: |
-        One item per distinct prefix among the target's matching, unexpired,
+        One item per distinct prefix among the worker's matching, unexpired,
         undeleted entries, limited to its families, ordered by prefix. When
         several entries share a prefix the item carries the latest expiry, or
         `null` if any is unlimited. `revision`, `generated_at` and the items
         come from one database snapshot.
 
         The `ETag` is a quoted hex SHA-256 over the families and the items
-        only, so it changes only when this target's content changes. With a
+        only, so it changes only when this worker's content changes. With a
         matching `If-None-Match` the response is 304 with no body; the
         `IPValet-Revision` and `IPValet-Generated-At` headers are present on
         both, and the worker reports status with those values.
@@ -360,7 +370,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DesiredState" }
         "304":
-          description: Unchanged for this target since the given ETag.
+          description: Unchanged for this worker since the given ETag.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
             ETag: { $ref: "#/components/headers/ETag" }
@@ -381,7 +391,7 @@ paths:
       description: |
         Sends one `changed` event immediately on connect, whatever
         `Last-Event-ID` says, and another whenever the global revision may
-        have changed. Events can arrive more often than this target's state
+        have changed. Events can arrive more often than this worker's state
         changes; fetch desired state with `If-None-Match` to absorb that.
 
         ```
@@ -426,13 +436,14 @@ paths:
       summary: Report the applied revision, rejections or an error
       description: |
         Report success only when everything except the listed rejections is
-        in place on the firewall; otherwise report an error.
+        applied (for example, in place on the firewall the worker manages);
+        otherwise report an error.
 
-        Every report sets `last_seen_at`, `last_worker_id` and
-        `last_worker_version`. A success report whose revision is at least the
+        Every report sets `last_seen_at`, `last_instance` and
+        `last_version`. A success report whose revision is at least the
         stored `applied_revision` raises it, raises `applied_generated_at` to
         the reported `generated_at` (never lowering it) and replaces the
-        target's rejections. A success report with an older revision is stale
+        worker's rejections. A success report with an older revision is stale
         and changes nothing else. An error report records `last_error` and
         leaves the applied state alone. A report may be repeated as a heartbeat.
       security: [{ workerKey: [] }]
@@ -560,10 +571,10 @@ paths:
       summary: Delete a realm
       description: |
         Soft-deletes the realm's live entries (one revision bump; they read
-        `removing` until every target that held them confirms, including
-        targets whose subscriptions go with the realm) and deletes its rules,
+        `removing` until every worker that held them confirms, including
+        workers whose subscriptions go with the realm) and deletes its rules,
         client bindings and subscriptions, bumping `subscriptions_revision` on
-        the affected targets. Needs no confirmation. A client left with no realm gets 403
+        the affected workers. Needs no confirmation. A client left with no realm gets 403
         `realm_not_allowed` on every call.
       security: [{ adminKey: [] }]
       responses:
@@ -891,20 +902,20 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
-  # ---------------------------------------------------------------- admin: targets
+  # ---------------------------------------------------------------- admin: workers
 
-  /v1/admin/targets:
+  /v1/admin/workers:
     get:
       tags: [admin]
-      operationId: listTargets
-      summary: List targets
+      operationId: listWorkers
+      summary: List workers
       security: [{ adminKey: [] }]
       parameters:
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
       responses:
         "200":
-          description: A page of targets, by name.
+          description: A page of workers, by name.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
@@ -913,7 +924,7 @@ paths:
                 type: object
                 required: [items, next_cursor]
                 properties:
-                  items: { type: array, items: { $ref: "#/components/schemas/Target" } }
+                  items: { type: array, items: { $ref: "#/components/schemas/Worker" } }
                   next_cursor: { $ref: "#/components/schemas/NextCursor" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
@@ -922,22 +933,22 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
       tags: [admin]
-      operationId: createTarget
-      summary: Create a target
+      operationId: createWorker
+      summary: Create a worker
       security: [{ adminKey: [] }]
       requestBody:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TargetCreate" }
+            schema: { $ref: "#/components/schemas/WorkerCreate" }
       responses:
         "201":
-          description: The target.
+          description: The worker.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TargetMutation" }
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -946,22 +957,22 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
-  /v1/admin/targets/{id}:
+  /v1/admin/workers/{id}:
     parameters:
       - $ref: "#/components/parameters/IdPath"
     get:
       tags: [admin]
-      operationId: getTarget
-      summary: One target
+      operationId: getWorker
+      summary: One worker
       security: [{ adminKey: [] }]
       responses:
         "200":
-          description: The target.
+          description: The worker.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/Target" }
+              schema: { $ref: "#/components/schemas/Worker" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -970,10 +981,10 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
     patch:
       tags: [admin]
-      operationId: updateTarget
-      summary: Change a target
+      operationId: updateWorker
+      summary: Change a worker
       description: |
-        A change to `ipv4` or `ipv6` bumps the revision and the target's
+        A change to `ipv4` or `ipv6` bumps the revision and the worker's
         `subscriptions_revision`, and goes through the impact check. Name and
         label changes do neither.
       security: [{ adminKey: [] }]
@@ -984,15 +995,15 @@ paths:
         required: true
         content:
           application/json:
-            schema: { $ref: "#/components/schemas/TargetPatch" }
+            schema: { $ref: "#/components/schemas/WorkerPatch" }
       responses:
         "200":
-          description: The target.
+          description: The worker.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TargetMutation" }
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1011,8 +1022,8 @@ paths:
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
       tags: [admin]
-      operationId: deleteTarget
-      summary: Delete a target
+      operationId: deleteWorker
+      summary: Delete a worker
       description: Deletes its subscriptions, rejections and worker keys. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
@@ -1020,12 +1031,12 @@ paths:
         - $ref: "#/components/parameters/Confirm"
       responses:
         "200":
-          description: The deleted target.
+          description: The deleted worker.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TargetMutation" }
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1034,13 +1045,13 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
-  /v1/admin/targets/{id}/subscriptions:
+  /v1/admin/workers/{id}/subscriptions:
     parameters:
       - $ref: "#/components/parameters/IdPath"
     get:
       tags: [admin]
       operationId: listSubscriptions
-      summary: A target's subscriptions
+      summary: A worker's subscriptions
       security: [{ adminKey: [] }]
       parameters:
         - $ref: "#/components/parameters/Limit"
@@ -1067,11 +1078,11 @@ paths:
     post:
       tags: [admin]
       operationId: createSubscription
-      summary: Subscribe a target
+      summary: Subscribe a worker
       description: |
-        Bumps the revision and the target's `subscriptions_revision`, so the
-        group's existing entries read `pending` on this target until its
-        worker catches up. Subscriptions are never edited: delete and create.
+        Bumps the revision and the worker's `subscriptions_revision`, so the
+        group's existing entries read `pending` on this worker until it
+        catches up. Subscriptions are never edited: delete and create.
         A realm `*` with a specific user or group returns a
         `cross_realm_selector` warning.
       security: [{ adminKey: [] }]
@@ -1104,7 +1115,7 @@ paths:
       tags: [admin]
       operationId: deleteSubscription
       summary: Delete a subscription
-      description: Bumps the revision and the target's `subscriptions_revision`. Goes through the impact check.
+      description: Bumps the revision and the worker's `subscriptions_revision`. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
         - $ref: "#/components/parameters/DryRun"
@@ -1125,22 +1136,22 @@ paths:
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
-  /v1/admin/targets/{id}/health:
+  /v1/admin/workers/{id}/health:
     parameters:
       - $ref: "#/components/parameters/IdPath"
     get:
       tags: [admin]
-      operationId: getTargetHealth
-      summary: One target's worker health
+      operationId: getWorkerHealth
+      summary: One worker's health
       security: [{ adminKey: [] }]
       responses:
         "200":
-          description: The target's health.
+          description: The worker's health.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/TargetHealth" }
+              schema: { $ref: "#/components/schemas/WorkerHealth" }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1152,21 +1163,21 @@ paths:
     get:
       tags: [admin]
       operationId: getHealth
-      summary: Every target's worker health
+      summary: Every worker's health
       security: [{ adminKey: [] }]
       responses:
         "200":
-          description: The current revision and every target's health, by name.
+          description: The current revision and every worker's health, by name.
           headers:
             X-Request-Id: { $ref: "#/components/headers/RequestId" }
           content:
             application/json:
               schema:
                 type: object
-                required: [revision, targets]
+                required: [revision, workers]
                 properties:
                   revision: { type: integer, format: int64 }
-                  targets: { type: array, items: { $ref: "#/components/schemas/TargetHealth" } }
+                  workers: { type: array, items: { $ref: "#/components/schemas/WorkerHealth" } }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -1189,7 +1200,7 @@ paths:
         - name: client_id
           in: query
           schema: { $ref: "#/components/schemas/UUID" }
-        - name: target_id
+        - name: worker_id
           in: query
           schema: { $ref: "#/components/schemas/UUID" }
         - $ref: "#/components/parameters/Limit"
@@ -1316,9 +1327,9 @@ paths:
         - name: client_id
           in: query
           schema: { $ref: "#/components/schemas/UUID" }
-        - name: target_id
+        - name: worker_id
           in: query
-          description: Entries the target matches (families and subscriptions).
+          description: Entries the worker matches (families and subscriptions).
           schema: { $ref: "#/components/schemas/UUID" }
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"
@@ -1439,7 +1450,7 @@ components:
     workerKey:
       type: http
       scheme: bearer
-      description: A worker key, bound to exactly one target.
+      description: A worker key, bound to one worker. A worker may hold several keys, for rotation.
     adminKey:
       type: http
       scheme: bearer
@@ -1674,20 +1685,20 @@ components:
     EntryState:
       type: string
       description: |
-        `active`: every matching target applied it. `pending`: a matching
-        target has not caught up. `partial`: some targets rejected it, the rest
-        applied it. `rejected`: every matching target rejected it. `unrouted`:
-        no target matches it (only after a routing change). `removing`:
-        deleted or expired, but a target that held it has not confirmed
+        `active`: every matching worker applied it. `pending`: a matching
+        worker has not caught up. `partial`: some workers rejected it, the rest
+        applied it. `rejected`: every matching worker rejected it. `unrouted`:
+        no worker matches it (only after a routing change). `removing`:
+        deleted or expired, but a worker that held it has not confirmed
         removal. `removed`: deleted and confirmed. `expired`: expired and
         confirmed.
       enum: [active, pending, partial, rejected, unrouted, removing, removed, expired]
-    TargetEntryState:
+    WorkerEntryState:
       type: string
       description: |
-        An entry's state on one target. A live entry also lists, as
-        `removing`, a target that stopped matching it and has not yet
-        confirmed removing it; such a target does not count towards the
+        An entry's state on one worker. A live entry also lists, as
+        `removing`, a worker that stopped matching it and has not yet
+        confirmed removing it; such a worker does not count towards the
         entry's overall state.
       enum: [active, pending, rejected, removing, removed, expired]
     ErrorCode:
@@ -1720,11 +1731,12 @@ components:
     WorkerRejectionCode:
       type: string
       description: |
-        `prefix_too_broad`: broader than the worker's floor. `address_not_allowed`:
-        outside the worker's safety floor. `family_unsupported`: the firewall
-        cannot hold this family. `target_full`: the firewall object has no
-        room. `invalid`: the firewall refused it for another reason.
-      enum: [prefix_too_broad, address_not_allowed, family_unsupported, target_full, invalid]
+        `prefix_too_broad`: broader than the worker's floor allows.
+        `address_not_allowed`: outside the worker's safety floor.
+        `family_unsupported`: the worker cannot apply this address family.
+        `capacity_exceeded`: the worker has no room for it (for example, a full
+        firewall object). `invalid`: refused for another reason.
+      enum: [prefix_too_broad, address_not_allowed, family_unsupported, capacity_exceeded, invalid]
     ImpactEffect:
       type: string
       enum: [unrouted, ip_denied, prefix_too_broad, ttl_exceeded, cap_exceeded]
@@ -1823,7 +1835,7 @@ components:
           type: array
           items:
             type: object
-            required: [id, realm, user, group, prefix, expires_at, replaced, state, targets]
+            required: [id, realm, user, group, prefix, expires_at, replaced, state, workers]
             properties:
               id: { $ref: "#/components/schemas/UUID" }
               realm: { $ref: "#/components/schemas/RealmName" }
@@ -1837,21 +1849,21 @@ components:
                 type: boolean
                 description: True when an existing entry was replaced in place.
               state: { $ref: "#/components/schemas/EntryState" }
-              targets:
+              workers:
                 type: array
-                items: { $ref: "#/components/schemas/ClientTargetState" }
-    ClientTargetState:
+                items: { $ref: "#/components/schemas/ClientWorkerState" }
+    ClientWorkerState:
       type: object
       required: [label, state]
       properties:
         label: { type: string }
-        state: { $ref: "#/components/schemas/TargetEntryState" }
+        state: { $ref: "#/components/schemas/WorkerEntryState" }
         code:
           $ref: "#/components/schemas/WorkerRejectionCode"
           description: Present when `state` is `rejected`.
-    AdminTargetState:
+    AdminWorkerState:
       allOf:
-        - $ref: "#/components/schemas/ClientTargetState"
+        - $ref: "#/components/schemas/ClientWorkerState"
         - type: object
           required: [id, name, last_seen_at]
           properties:
@@ -1876,24 +1888,24 @@ components:
         deleted_at: { $ref: "#/components/schemas/NullableTimestamp" }
         state: { $ref: "#/components/schemas/EntryState" }
     Entry:
-      description: An entry as clients see it. Targets are ordered by label, then id.
+      description: An entry as clients see it. Workers are ordered by label, then id.
       allOf:
         - $ref: "#/components/schemas/EntryBase"
         - type: object
-          required: [targets]
+          required: [workers]
           properties:
-            targets:
+            workers:
               type: array
-              items: { $ref: "#/components/schemas/ClientTargetState" }
+              items: { $ref: "#/components/schemas/ClientWorkerState" }
     AdminEntry:
       allOf:
         - $ref: "#/components/schemas/EntryBase"
         - type: object
-          required: [targets, client_id, key_id, revision, deleted_by]
+          required: [workers, client_id, key_id, revision, deleted_by]
           properties:
-            targets:
+            workers:
               type: array
-              items: { $ref: "#/components/schemas/AdminTargetState" }
+              items: { $ref: "#/components/schemas/AdminWorkerState" }
             client_id:
               type: [string, "null"]
               format: uuid
@@ -1945,9 +1957,13 @@ components:
         - type: object
           title: Success
           additionalProperties: false
-          required: [worker_id, revision, generated_at]
+          required: [instance, revision, generated_at]
           properties:
-            worker_id: { type: string, minLength: 1, maxLength: 128 }
+            instance:
+              type: string
+              minLength: 1
+              maxLength: 128
+              description: Names the process that sent the report (for example a host name), for diagnostics.
             version: { type: string, maxLength: 64 }
             revision:
               type: integer
@@ -1975,9 +1991,13 @@ components:
         - type: object
           title: Failure
           additionalProperties: false
-          required: [worker_id, revision, error]
+          required: [instance, revision, error]
           properties:
-            worker_id: { type: string, minLength: 1, maxLength: 128 }
+            instance:
+              type: string
+              minLength: 1
+              maxLength: 128
+              description: Names the process that sent the report (for example a host name), for diagnostics.
             version: { type: string, maxLength: 64 }
             revision: { type: integer, format: int64, minimum: 0 }
             error: { type: string, minLength: 1, maxLength: 2000 }
@@ -2099,8 +2119,9 @@ components:
       allOf:
         - $ref: "#/components/schemas/Client"
         - $ref: "#/components/schemas/MutationExtras"
-    Target:
+    Worker:
       type: object
+      description: A subscriber that applies the entries routed to it and reports what it applied.
       required: [id, name, label, ipv4, ipv6, applied_revision, applied_generated_at, subscriptions_revision,
         last_seen_at, created_at, updated_at]
       properties:
@@ -2114,7 +2135,7 @@ components:
           type: string
           minLength: 1
           maxLength: 256
-          description: The only target field clients see.
+          description: The only worker field clients see.
         ipv4: { type: boolean }
         ipv6: { type: boolean }
         applied_revision: { type: integer, format: int64 }
@@ -2123,7 +2144,7 @@ components:
         last_seen_at: { $ref: "#/components/schemas/NullableTimestamp" }
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
-    TargetCreate:
+    WorkerCreate:
       type: object
       additionalProperties: false
       required: [name, label, ipv4, ipv6]
@@ -2133,7 +2154,7 @@ components:
         label: { type: string, minLength: 1, maxLength: 256 }
         ipv4: { type: boolean }
         ipv6: { type: boolean }
-    TargetPatch:
+    WorkerPatch:
       type: object
       additionalProperties: false
       properties:
@@ -2141,16 +2162,16 @@ components:
         label: { type: string, minLength: 1, maxLength: 256 }
         ipv4: { type: boolean }
         ipv6: { type: boolean }
-    TargetMutation:
+    WorkerMutation:
       allOf:
-        - $ref: "#/components/schemas/Target"
+        - $ref: "#/components/schemas/Worker"
         - $ref: "#/components/schemas/MutationExtras"
     Subscription:
       type: object
-      required: [id, target_id, realm, user, group, created_at]
+      required: [id, worker_id, realm, user, group, created_at]
       properties:
         id: { $ref: "#/components/schemas/UUID" }
-        target_id: { $ref: "#/components/schemas/UUID" }
+        worker_id: { $ref: "#/components/schemas/UUID" }
         realm: { $ref: "#/components/schemas/RealmSelector" }
         user: { $ref: "#/components/schemas/Selector" }
         group: { $ref: "#/components/schemas/Selector" }
@@ -2170,12 +2191,12 @@ components:
     Key:
       type: object
       description: A key record. Never contains the secret or its hash.
-      required: [id, kind, client_id, target_id, name, created_at, expires_at, revoked_at, last_used_at]
+      required: [id, kind, client_id, worker_id, name, created_at, expires_at, revoked_at, last_used_at]
       properties:
         id: { $ref: "#/components/schemas/KeyId" }
         kind: { $ref: "#/components/schemas/KeyKind" }
         client_id: { type: [string, "null"], format: uuid }
-        target_id: { type: [string, "null"], format: uuid }
+        worker_id: { type: [string, "null"], format: uuid }
         name: { type: string }
         created_at: { $ref: "#/components/schemas/Timestamp" }
         expires_at: { $ref: "#/components/schemas/NullableTimestamp" }
@@ -2187,11 +2208,11 @@ components:
       type: object
       additionalProperties: false
       required: [kind, name]
-      description: Client keys need `client_id`, worker keys need `target_id`, admin keys need neither.
+      description: Client keys need `client_id`, worker keys need `worker_id`, admin keys need neither.
       properties:
         kind: { $ref: "#/components/schemas/KeyKind" }
         client_id: { $ref: "#/components/schemas/UUID" }
-        target_id: { $ref: "#/components/schemas/UUID" }
+        worker_id: { $ref: "#/components/schemas/UUID" }
         name: { type: string, minLength: 1, maxLength: 128 }
         expires_at:
           $ref: "#/components/schemas/Timestamp"
@@ -2340,12 +2361,12 @@ components:
 
     # ---------- health and audit
 
-    TargetHealth:
+    WorkerHealth:
       type: object
-      required: [target_id, name, label, applied_revision, revision, lag, applied_generated_at, last_seen_at,
-        last_error, last_error_at, last_worker_id, last_worker_version, worker_streams, rejections]
+      required: [worker_id, name, label, applied_revision, revision, lag, applied_generated_at, last_seen_at,
+        last_error, last_error_at, last_instance, last_version, worker_streams, rejections]
       properties:
-        target_id: { $ref: "#/components/schemas/UUID" }
+        worker_id: { $ref: "#/components/schemas/UUID" }
         name: { type: string }
         label: { type: string }
         applied_revision: { type: integer, format: int64 }
@@ -2361,12 +2382,12 @@ components:
         last_seen_at: { $ref: "#/components/schemas/NullableTimestamp" }
         last_error: { type: [string, "null"] }
         last_error_at: { $ref: "#/components/schemas/NullableTimestamp" }
-        last_worker_id: { type: [string, "null"] }
-        last_worker_version: { type: [string, "null"] }
+        last_instance: { type: [string, "null"] }
+        last_version: { type: [string, "null"] }
         worker_streams:
           type: integer
           minimum: 0
-          description: Worker event streams connected to the instance that answered.
+          description: Event streams this worker has open to the API server that answered.
         rejections:
           type: array
           items:

@@ -31,12 +31,12 @@ func adminEntry(h *testutil.Harness, id string) map[string]any {
 	return h.Admin(200, "GET", "/v1/admin/entries/"+id, nil)
 }
 
-// entryState returns the overall state and per-target states keyed by target name.
+// entryState returns the overall state and per-worker states keyed by worker name.
 func entryState(h *testutil.Harness, id string) (string, map[string]string) {
 	h.T.Helper()
 	e := adminEntry(h, id)
 	per := map[string]string{}
-	for _, t := range e["targets"].([]any) {
+	for _, t := range e["workers"].([]any) {
 		m := t.(map[string]any)
 		per[m["name"].(string)] = m["state"].(string)
 	}

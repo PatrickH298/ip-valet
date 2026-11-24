@@ -1,4 +1,4 @@
-// Package metrics defines the Prometheus metrics. Target and entry gauges are
+// Package metrics defines the Prometheus metrics. Worker and entry gauges are
 // read from the database at scrape time by a custom collector.
 package metrics
 
@@ -49,11 +49,11 @@ func New(pool *pgxpool.Pool, streams StreamCounter, log *slog.Logger) *Metrics {
 
 var (
 	descRevision    = prometheus.NewDesc("ipvalet_revision", "Current global revision.", nil, nil)
-	descApplied     = prometheus.NewDesc("ipvalet_target_applied_revision", "Revision the target's worker last applied.", []string{"target"}, nil)
-	descLag         = prometheus.NewDesc("ipvalet_target_revision_lag", "Current revision minus the target's applied revision.", []string{"target"}, nil)
-	descLastSeen    = prometheus.NewDesc("ipvalet_target_last_seen_timestamp_seconds", "Unix time of the target's last status report.", []string{"target"}, nil)
-	descRejections  = prometheus.NewDesc("ipvalet_target_rejections", "Prefixes the target's worker rejected.", []string{"target"}, nil)
-	descWorkers     = prometheus.NewDesc("ipvalet_worker_streams", "Worker event streams connected to this instance.", []string{"target"}, nil)
+	descApplied     = prometheus.NewDesc("ipvalet_worker_applied_revision", "Revision the worker last reported applying.", []string{"worker"}, nil)
+	descLag         = prometheus.NewDesc("ipvalet_worker_revision_lag", "Current revision minus the worker's applied revision.", []string{"worker"}, nil)
+	descLastSeen    = prometheus.NewDesc("ipvalet_worker_last_seen_timestamp_seconds", "Unix time of the worker's last status report.", []string{"worker"}, nil)
+	descRejections  = prometheus.NewDesc("ipvalet_worker_rejections", "Prefixes the worker reported rejecting.", []string{"worker"}, nil)
+	descWorkers     = prometheus.NewDesc("ipvalet_worker_streams", "Worker event streams connected to this instance.", []string{"worker"}, nil)
 	descClients     = prometheus.NewDesc("ipvalet_client_streams", "Client event streams connected to this instance.", nil, nil)
 	descEntriesLive = prometheus.NewDesc("ipvalet_entries_live", "Live, unexpired entries per realm.", []string{"realm"}, nil)
 )
@@ -86,10 +86,10 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 	workers := c.streams.WorkerStreams()
 	rows, err := c.pool.Query(ctx, `
 		SELECT t.id::text, t.name, t.applied_revision, t.last_seen_at,
-		       (SELECT count(*) FROM target_rejections r WHERE r.target_id = t.id)
-		FROM targets t ORDER BY t.name`)
+		       (SELECT count(*) FROM worker_rejections r WHERE r.worker_id = t.id)
+		FROM workers t ORDER BY t.name`)
 	if err != nil {
-		c.log.Warn("metrics: reading targets failed", "error", err.Error())
+		c.log.Warn("metrics: reading workers failed", "error", err.Error())
 		return
 	}
 	for rows.Next() {

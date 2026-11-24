@@ -28,7 +28,7 @@ type Principal struct {
 	RateLimit *int // nil = IPVALET_DEFAULT_RATE_LIMIT
 
 	// Worker keys.
-	TargetID string
+	WorkerID string
 }
 
 // HasRealm reports whether a client principal is bound to realm.
@@ -115,20 +115,20 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 	var (
 		p                  = &Principal{Actor: key.ID, KeyID: key.ID}
 		hash               []byte
-		clientID, targetID *string
+		clientID, workerID *string
 		active             bool
 		rateLimit          *int32
 		realms             []string
 	)
 	err = a.pool.QueryRow(ctx, `
-		SELECT k.kind, k.secret_hash, k.client_id::text, k.target_id::text,
+		SELECT k.kind, k.secret_hash, k.client_id::text, k.worker_id::text,
 		       (k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())),
 		       c.rate_limit_per_minute,
 		       ARRAY(SELECT cr.realm::text FROM client_realms cr
 		             WHERE cr.client_id = k.client_id ORDER BY cr.realm)
 		FROM api_keys k LEFT JOIN clients c ON c.id = k.client_id
 		WHERE k.id = $1`, key.ID).
-		Scan(&p.Kind, &hash, &clientID, &targetID, &active, &rateLimit, &realms)
+		Scan(&p.Kind, &hash, &clientID, &workerID, &active, &rateLimit, &realms)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errUnauthenticated
 	}
@@ -160,7 +160,7 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 			return nil, err
 		}
 	case KindWorker:
-		p.TargetID = *targetID
+		p.WorkerID = *workerID
 	}
 	return p, nil
 }

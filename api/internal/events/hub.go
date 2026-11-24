@@ -17,7 +17,7 @@ const (
 type Sub struct {
 	C        chan struct{}
 	kind     string
-	targetID string
+	workerID string
 }
 
 // Hub fans notifications out to registered streams without blocking:
@@ -31,9 +31,9 @@ type Hub struct {
 // NewHub returns an empty hub.
 func NewHub() *Hub { return &Hub{subs: map[*Sub]struct{}{}} }
 
-// Subscribe registers a stream. targetID is set for worker streams.
-func (h *Hub) Subscribe(kind, targetID string) *Sub {
-	s := &Sub{C: make(chan struct{}, 1), kind: kind, targetID: targetID}
+// Subscribe registers a stream. workerID is set for worker streams.
+func (h *Hub) Subscribe(kind, workerID string) *Sub {
+	s := &Sub{C: make(chan struct{}, 1), kind: kind, workerID: workerID}
 	h.mu.Lock()
 	h.subs[s] = struct{}{}
 	h.mu.Unlock()
@@ -82,14 +82,14 @@ func (h *Hub) WakeAll() { h.wake(func(*Sub) bool { return true }) }
 // Revision returns the highest revision seen in a notification.
 func (h *Hub) Revision() int64 { return h.rev.Load() }
 
-// WorkerStreams counts connected worker streams per target id.
+// WorkerStreams counts connected worker streams per worker id.
 func (h *Hub) WorkerStreams() map[string]int {
 	out := map[string]int{}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for s := range h.subs {
 		if s.kind == KindWorker {
-			out[s.targetID]++
+			out[s.workerID]++
 		}
 	}
 	return out

@@ -26,7 +26,7 @@ type entryFilter struct {
 	state        string
 	includeEnded bool
 	clientID     *string
-	targetID     *string
+	workerID     *string
 }
 
 type entryCursor struct {
@@ -37,7 +37,7 @@ type entryCursor struct {
 func parseEntryFilter(r *http.Request, admin bool) (*entryFilter, error) {
 	allowed := []string{"realm", "user", "group", "prefix", "state", "include_ended", "limit", "cursor"}
 	if admin {
-		allowed = append(allowed, "client_id", "target_id")
+		allowed = append(allowed, "client_id", "worker_id")
 	}
 	if err := checkQuery(r, allowed...); err != nil {
 		return nil, err
@@ -82,11 +82,11 @@ func parseEntryFilter(r *http.Request, admin bool) (*entryFilter, error) {
 		}
 		f.clientID = &v
 	}
-	if v := q.Get("target_id"); v != "" {
+	if v := q.Get("worker_id"); v != "" {
 		if !validUUID(v) {
-			fe.add("target_id", "must be a UUID")
+			fe.add("worker_id", "must be a UUID")
 		}
-		f.targetID = &v
+		f.workerID = &v
 	}
 	if err := fe.err(); err != nil {
 		return nil, err
@@ -129,9 +129,9 @@ func queryEntries(ctx context.Context, q db.Querier, f *entryFilter, page pagePa
 	if f.clientID != nil {
 		where = append(where, "e.client_id = "+arg(*f.clientID)+"::uuid")
 	}
-	if f.targetID != nil {
-		where = append(where, `EXISTS (SELECT 1 FROM targets t JOIN subscriptions s ON s.target_id = t.id
-			WHERE t.id = `+arg(*f.targetID)+`::uuid
+	if f.workerID != nil {
+		where = append(where, `EXISTS (SELECT 1 FROM workers t JOIN subscriptions s ON s.worker_id = t.id
+			WHERE t.id = `+arg(*f.workerID)+`::uuid
 			  AND ((family(e.prefix) = 4 AND t.ipv4) OR (family(e.prefix) = 6 AND t.ipv6))
 			  AND (s.realm IS NULL OR s.realm = e.realm)
 			  AND (s.username IS NULL OR s.username = e.username)

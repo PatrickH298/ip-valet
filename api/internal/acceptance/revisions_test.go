@@ -140,8 +140,8 @@ func TestDesiredState(t *testing.T) {
 	h := testutil.New(t, nil)
 	h.CreateRealm("r")
 	h.ClearRules("r", "ttl")
-	v4 := h.CreateTarget("v4", true, false)
-	v6 := h.CreateTarget("v6", false, true)
+	v4 := h.CreateWorker("v4", true, false)
+	v6 := h.CreateWorker("v6", false, true)
 	h.Subscribe(v4, "r", "*", "*")
 	h.Subscribe(v6, "r", "*", "*")
 	key := h.ClientKey(h.CreateClient("web", "r"))
@@ -196,7 +196,7 @@ func TestDesiredState(t *testing.T) {
 	if r.Header.Get("IPValet-Revision") == "" || r.Header.Get("IPValet-Generated-At") != ds.GeneratedAt {
 		t.Fatalf("headers: %v", r.Header)
 	}
-	// The IPv6 target sees only the IPv6 entry.
+	// The IPv6 worker sees only the IPv6 entry.
 	v6ds := h.DesiredState(h.WorkerKey(v6)).JSON(t)
 	if items := v6ds["entries"].([]any); len(items) != 1 || items[0].(map[string]any)["prefix"] != "2a00:1450::/64" {
 		t.Fatalf("v6 entries = %v", items)
@@ -217,8 +217,8 @@ func TestDesiredStateETag(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	h.CreateRealm("r")
-	a := h.CreateTarget("a", true, true)
-	b := h.CreateTarget("b", true, true)
+	a := h.CreateWorker("a", true, true)
+	b := h.CreateWorker("b", true, true)
 	h.Subscribe(a, "r", "*", "ga")
 	h.Subscribe(b, "r", "*", "gb")
 	key := h.ClientKey(h.CreateClient("web", "r"))
@@ -239,16 +239,16 @@ func TestDesiredStateETag(t *testing.T) {
 		t.Fatalf("304 headers: %v", nm.Header)
 	}
 
-	// A change to the other target's entries bumps the revision but not this ETag.
+	// A change to the other worker's entries bumps the revision but not this ETag.
 	submitOK(h, key, sub("p", "8.8.4.4", "1d", "gb"))
 	nm = h.DesiredState(wa, "If-None-Match", etag)
 	if nm.Status != 304 {
-		t.Fatalf("after another target's change: %d", nm.Status)
+		t.Fatalf("after another worker's change: %d", nm.Status)
 	}
 	if nm.Header.Get("IPValet-Revision") == rev1 {
 		t.Fatal("IPValet-Revision did not advance")
 	}
-	// A change to this target's entries changes it.
+	// A change to this worker's entries changes it.
 	submitOK(h, key, sub("p", "8.8.4.4", "1d", "ga"))
 	if r := h.DesiredState(wa, "If-None-Match", etag); r.Status != 200 || r.Header.Get("ETag") == etag {
 		t.Fatalf("after own change: %d", r.Status)
@@ -265,21 +265,21 @@ func TestStatusReports(t *testing.T) {
 	ds := h.DesiredState(s.WorkerKey).JSON(t)
 	gen := ds["generated_at"].(string)
 	report := func(rev int64, extra map[string]any) map[string]any {
-		body := map[string]any{"worker_id": "w1", "version": "1.0", "revision": rev}
+		body := map[string]any{"instance": "w1", "version": "1.0", "revision": rev}
 		for k, v := range extra {
 			body[k] = v
 		}
 		return h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, body)
 	}
-	target := func() map[string]any { return h.Admin(200, "GET", "/v1/admin/targets/"+s.TargetID+"/health", nil) }
+	worker := func() map[string]any { return h.Admin(200, "GET", "/v1/admin/workers/"+s.WorkerID+"/health", nil) }
 
 	out := report(5, map[string]any{"generated_at": gen, "rejected": []map[string]any{
 		{"prefix": "8.8.8.1", "code": "address_not_allowed", "detail": "floor"}}})
 	if out["applied_revision"].(float64) != 5 {
 		t.Fatalf("applied = %v", out)
 	}
-	t1 := target()
-	if t1["applied_revision"].(float64) != 5 || len(t1["rejections"].([]any)) != 1 || t1["last_worker_version"] != "1.0" {
+	t1 := worker()
+	if t1["applied_revision"].(float64) != 5 || len(t1["rejections"].([]any)) != 1 || t1["last_version"] != "1.0" {
 		t.Fatalf("after report: %v", t1)
 	}
 	time.Sleep(10 * time.Millisecond)
@@ -289,14 +289,14 @@ func TestStatusReports(t *testing.T) {
 	if out["applied_revision"].(float64) != 5 {
 		t.Fatalf("stale report lowered applied: %v", out)
 	}
-	t2 := target()
+	t2 := worker()
 	if t2["applied_revision"].(float64) != 5 || len(t2["rejections"].([]any)) != 1 || t2["last_seen_at"] == t1["last_seen_at"] {
 		t.Fatalf("after stale report: %v", t2)
 	}
 
 	// Error report: applied state unchanged.
 	out = report(5, map[string]any{"error": "controller timeout"})
-	t3 := target()
+	t3 := worker()
 	if out["applied_revision"].(float64) != 5 || t3["last_error"] != "controller timeout" ||
 		t3["applied_generated_at"] != t1["applied_generated_at"] || len(t3["rejections"].([]any)) != 1 {
 		t.Fatalf("after error report: %v", t3)
@@ -304,13 +304,13 @@ func TestStatusReports(t *testing.T) {
 
 	// Invalid reports.
 	for _, b := range []map[string]any{
-		{"worker_id": "w", "revision": 999, "generated_at": gen},
-		{"worker_id": "w", "revision": 1},
-		{"worker_id": "w", "revision": 1, "generated_at": gen, "error": "x"},
-		{"worker_id": "w", "revision": 1, "generated_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
-		{"worker_id": "", "revision": 1, "generated_at": gen},
-		{"worker_id": "w", "revision": 1, "generated_at": gen, "rejected": []map[string]any{{"prefix": "x", "code": "invalid"}}},
-		{"worker_id": "w", "revision": 1, "generated_at": gen, "rejected": []map[string]any{{"prefix": "8.8.8.8", "code": "nope"}}},
+		{"instance": "w", "revision": 999, "generated_at": gen},
+		{"instance": "w", "revision": 1},
+		{"instance": "w", "revision": 1, "generated_at": gen, "error": "x"},
+		{"instance": "w", "revision": 1, "generated_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		{"instance": "", "revision": 1, "generated_at": gen},
+		{"instance": "w", "revision": 1, "generated_at": gen, "rejected": []map[string]any{{"prefix": "x", "code": "invalid"}}},
+		{"instance": "w", "revision": 1, "generated_at": gen, "rejected": []map[string]any{{"prefix": "8.8.8.8", "code": "nope"}}},
 	} {
 		if r := h.Do("POST", "/v1/worker/status", s.WorkerKey, b); r.Status != 400 {
 			t.Errorf("%v: %d %s", b, r.Status, r.Body)
@@ -322,8 +322,8 @@ func TestAppliedStates(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	h.CreateRealm("r")
-	a := h.CreateTarget("alpha", true, true)
-	b := h.CreateTarget("beta", true, true)
+	a := h.CreateWorker("alpha", true, true)
+	b := h.CreateWorker("beta", true, true)
 	subA := h.Subscribe(a, "r", "*", "*")
 	key := h.ClientKey(h.CreateClient("web", "r"))
 	wa, wb := h.WorkerKey(a), h.WorkerKey(b)
@@ -337,21 +337,21 @@ func TestAppliedStates(t *testing.T) {
 		t.Fatalf("after apply: %s", st)
 	}
 
-	// A new subscription makes the old entry pending on that target, not active.
+	// A new subscription makes the old entry pending on that worker, not active.
 	h.Subscribe(b, "r", "*", "*")
 	st, per := entryState(h, id)
 	if st != "pending" || per["alpha"] != "active" || per["beta"] != "pending" {
 		t.Fatalf("after new subscription: %s %v", st, per)
 	}
-	h.Apply(wb, map[string]any{"prefix": "8.8.8.8/32", "code": "target_full"})
+	h.Apply(wb, map[string]any{"prefix": "8.8.8.8/32", "code": "capacity_exceeded"})
 	st, per = entryState(h, id)
 	if st != "partial" || per["beta"] != "rejected" {
 		t.Fatalf("partial: %s %v", st, per)
 	}
 	client := h.Must(200, "GET", "/v1/entries/"+id, key, nil)
-	for _, tv := range client["targets"].([]any) {
+	for _, tv := range client["workers"].([]any) {
 		m := tv.(map[string]any)
-		if m["label"] == "Beta" && m["code"] != "target_full" {
+		if m["label"] == "Beta" && m["code"] != "capacity_exceeded" {
 			t.Fatalf("client view lacks the rejection code: %v", m)
 		}
 		if _, leaked := m["last_seen_at"]; leaked {
@@ -371,7 +371,7 @@ func TestAppliedStates(t *testing.T) {
 	h.Apply(wb)
 	h.Admin(200, "DELETE", "/v1/admin/subscriptions/"+subA+"?confirm=true", nil)
 	// id2 is still matched by beta's subscription r/*/*, so remove that one too.
-	for _, sv := range h.Admin(200, "GET", "/v1/admin/targets/"+b+"/subscriptions", nil)["items"].([]any) {
+	for _, sv := range h.Admin(200, "GET", "/v1/admin/workers/"+b+"/subscriptions", nil)["items"].([]any) {
 		h.Admin(200, "DELETE", "/v1/admin/subscriptions/"+sv.(map[string]any)["id"].(string)+"?confirm=true", nil)
 	}
 	if st, _ := entryState(h, id2); st != "unrouted" {
@@ -388,7 +388,7 @@ func TestRemovalConfirmation(t *testing.T) {
 	exp := firstEntryID(submitOK(h, s.ClientKey, sub("p", "8.8.4.4", "1d", "g")))
 	h.Apply(s.WorkerKey)
 
-	// Deleted: removing until the target reports the deletion revision.
+	// Deleted: removing until the worker reports the deletion revision.
 	h.Must(200, "DELETE", "/v1/entries/"+del, s.ClientKey, nil)
 	delRev := adminEntry(h, del)
 	if delRev["state"] != "removing" {
@@ -399,7 +399,7 @@ func TestRemovalConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	ds := h.DesiredState(s.WorkerKey).JSON(t)
-	h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, map[string]any{"worker_id": "w", "revision": deletedRevision - 1,
+	h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, map[string]any{"instance": "w", "revision": deletedRevision - 1,
 		"generated_at": ds["generated_at"]})
 	if st, _ := entryState(h, del); st != "removing" {
 		t.Fatalf("before the deletion revision: %s", st)
@@ -525,7 +525,7 @@ func TestStatusReportLimits(t *testing.T) {
 				"prefix": fmt.Sprintf("ffff:ffff:ffff:ffff:ffff:ffff:ffff:%04x/128", 0x1000+i),
 				"code":   "address_not_allowed", "detail": strings.Repeat("x", detailLen)}
 		}
-		return map[string]any{"worker_id": strings.Repeat("w", 128), "version": strings.Repeat("v", 64),
+		return map[string]any{"instance": strings.Repeat("w", 128), "version": strings.Repeat("v", 64),
 			"revision": h.Revision(), "generated_at": gen, "rejected": items}
 	}
 	// The largest valid report fits in the default body limit.
@@ -535,7 +535,7 @@ func TestStatusReportLimits(t *testing.T) {
 		t.Fatalf("the largest valid report is %d bytes", len(body))
 	}
 	h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, largest)
-	if n := len(h.Admin(200, "GET", "/v1/admin/targets/"+s.TargetID+"/health", nil)["rejections"].([]any)); n != 200 {
+	if n := len(h.Admin(200, "GET", "/v1/admin/workers/"+s.WorkerID+"/health", nil)["rejections"].([]any)); n != 200 {
 		t.Fatalf("%d rejections stored", n)
 	}
 	for _, bad := range []map[string]any{report(201, 10), report(1, 201)} {

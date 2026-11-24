@@ -282,17 +282,17 @@ func (h *Harness) CreateRealm(name string) {
 	h.Admin(201, "POST", "/v1/admin/realms", map[string]any{"name": name})
 }
 
-// CreateTarget creates a target and returns its id.
-func (h *Harness) CreateTarget(name string, ipv4, ipv6 bool) string {
+// CreateWorker creates a worker and returns its id.
+func (h *Harness) CreateWorker(name string, ipv4, ipv6 bool) string {
 	h.T.Helper()
-	return h.Admin(201, "POST", "/v1/admin/targets", map[string]any{
+	return h.Admin(201, "POST", "/v1/admin/workers", map[string]any{
 		"name": name, "label": strings.ToUpper(name[:1]) + name[1:], "ipv4": ipv4, "ipv6": ipv6})["id"].(string)
 }
 
 // Subscribe adds a subscription and returns its id.
-func (h *Harness) Subscribe(targetID, realm, user, group string) string {
+func (h *Harness) Subscribe(workerID, realm, user, group string) string {
 	h.T.Helper()
-	return h.Admin(201, "POST", "/v1/admin/targets/"+targetID+"/subscriptions", map[string]any{
+	return h.Admin(201, "POST", "/v1/admin/workers/"+workerID+"/subscriptions", map[string]any{
 		"realm": realm, "user": user, "group": group})["id"].(string)
 }
 
@@ -309,16 +309,16 @@ func (h *Harness) ClientKey(clientID string) string {
 }
 
 // WorkerKey creates a worker key.
-func (h *Harness) WorkerKey(targetID string) string {
+func (h *Harness) WorkerKey(workerID string) string {
 	h.T.Helper()
-	return h.Admin(201, "POST", "/v1/admin/keys", map[string]any{"kind": "worker", "target_id": targetID, "name": "w"})["key"].(string)
+	return h.Admin(201, "POST", "/v1/admin/keys", map[string]any{"kind": "worker", "worker_id": workerID, "name": "w"})["key"].(string)
 }
 
-// Setup is the common fixture: realm, dual-stack target subscribed to
+// Setup is the common fixture: realm, dual-stack worker subscribed to
 // everything in the realm, a client bound to the realm, and keys.
 type Setup struct {
 	Realm     string
-	TargetID  string
+	WorkerID  string
 	ClientID  string
 	ClientKey string
 	WorkerKey string
@@ -328,10 +328,10 @@ type Setup struct {
 func (h *Harness) Basic(realm string) Setup {
 	h.T.Helper()
 	h.CreateRealm(realm)
-	tid := h.CreateTarget("home-"+realm, true, true)
+	tid := h.CreateWorker("home-"+realm, true, true)
 	h.Subscribe(tid, realm, "*", "*")
 	cid := h.CreateClient("client-"+realm, realm)
-	return Setup{Realm: realm, TargetID: tid, ClientID: cid, ClientKey: h.ClientKey(cid), WorkerKey: h.WorkerKey(tid)}
+	return Setup{Realm: realm, WorkerID: tid, ClientID: cid, ClientKey: h.ClientKey(cid), WorkerKey: h.WorkerKey(tid)}
 }
 
 // Submit posts a submission with the client key.
@@ -378,7 +378,7 @@ func (h *Harness) Apply(workerKey string, rejected ...map[string]any) int64 {
 		rejected = []map[string]any{}
 	}
 	h.Must(200, "POST", "/v1/worker/status", workerKey, map[string]any{
-		"worker_id": "test-worker", "version": "0.0.1", "revision": rev,
+		"instance": "test-worker", "version": "0.0.1", "revision": rev,
 		"generated_at": m["generated_at"], "rejected": rejected})
 	return rev
 }

@@ -83,7 +83,7 @@ func (s *Server) workerEvents(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		return err
 	}
 	defer done()
-	sub := s.Hub.Subscribe(events.KindWorker, p.TargetID)
+	sub := s.Hub.Subscribe(events.KindWorker, p.WorkerID)
 	defer s.Hub.Unsubscribe(sub)
 
 	ctx := r.Context()

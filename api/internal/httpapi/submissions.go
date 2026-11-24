@@ -40,7 +40,7 @@ type submissionEntryView struct {
 	ExpiresAt *string            `json:"expires_at"`
 	Replaced  bool               `json:"replaced"`
 	State     string             `json:"state"`
-	Targets   []clientTargetView `json:"targets"`
+	Workers   []clientWorkerView `json:"workers"`
 }
 
 type submissionResponse struct {
@@ -142,7 +142,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 		}
 		var (
 			rs      rules.Set
-			targets []state.Target
+			workers []state.Worker
 			held    []rules.Held
 		)
 		realmOK := p.HasRealm(sub.realm)
@@ -151,7 +151,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 			if rs, err = db.LoadRules(ctx, tx, sub.realm); err != nil {
 				return err
 			}
-			if targets, err = db.LoadTargets(ctx, tx); err != nil {
+			if workers, err = db.LoadWorkers(ctx, tx); err != nil {
 				return err
 			}
 			if held, err = loadHeld(ctx, tx, sub.realm, sub.user); err != nil {
@@ -169,7 +169,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 				f = &rules.Failure{Code: rules.CodeRealmNotAllowed}
 			case sub.prefixErr != nil:
 				f = &rules.Failure{Code: rules.CodeInvalidPrefix}
-			case !state.Routed(targets, sub.realm, sub.user, g, sub.prefix):
+			case !state.Routed(workers, sub.realm, sub.user, g, sub.prefix):
 				f = &rules.Failure{Code: rules.CodeNoSubscriber}
 			default:
 				f = rs.CheckRules(cand, sub.ttl, held)
@@ -261,7 +261,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 			resp.Entries = append(resp.Entries, submissionEntryView{
 				ID: wr.entry.ID, Realm: wr.entry.Realm, User: wr.entry.User, Group: wr.entry.Group,
 				Prefix: wr.entry.Prefix.String(), ExpiresAt: tsPtr(wr.entry.ExpiresAt), Replaced: wr.replaced,
-				State: st, Targets: clientTargets(per),
+				State: st, Workers: clientWorkers(per),
 			})
 		}
 		return nil

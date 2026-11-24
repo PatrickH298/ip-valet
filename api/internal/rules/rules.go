@@ -28,7 +28,7 @@ const (
 	CodeCapExceeded     = "cap_exceeded"
 )
 
-// Impact effect for an entry that no target matches any more.
+// Impact effect for an entry that no worker matches any more.
 const EffectUnrouted = "unrouted"
 
 // IP rule actions.

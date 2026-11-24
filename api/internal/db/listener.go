@@ -17,8 +17,8 @@ type Listener struct {
 
 	// OnChange is called with the revision from each ipvalet_changes notification.
 	OnChange func(rev int64)
-	// OnStatus is called with the target id from each ipvalet_status notification.
-	OnStatus func(targetID string)
+	// OnStatus is called with the worker id from each ipvalet_status notification.
+	OnStatus func(workerID string)
 	// OnReconnect is called after the connection is re-established, since
 	// notifications may have been missed while it was down.
 	OnReconnect func()

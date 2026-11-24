@@ -283,13 +283,13 @@ func TestWarnings(t *testing.T) {
 		}
 	}
 
-	sr := h.Admin(201, "POST", "/v1/admin/targets/"+s.TargetID+"/subscriptions", map[string]any{
+	sr := h.Admin(201, "POST", "/v1/admin/workers/"+s.WorkerID+"/subscriptions", map[string]any{
 		"realm": "*", "user": "patrick", "group": "*"})
 	ws := sr["warnings"].([]any)
 	if len(ws) != 1 || ws[0].(map[string]any)["code"] != "cross_realm_selector" {
 		t.Fatalf("subscription warnings = %v", ws)
 	}
-	sr = h.Admin(201, "POST", "/v1/admin/targets/"+s.TargetID+"/subscriptions", map[string]any{
+	sr = h.Admin(201, "POST", "/v1/admin/workers/"+s.WorkerID+"/subscriptions", map[string]any{
 		"realm": "*", "user": "*", "group": "*"})
 	if ws := sr["warnings"].([]any); len(ws) != 0 {
 		t.Fatalf("realm * with user * warned: %v", ws)

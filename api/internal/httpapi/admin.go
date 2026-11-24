@@ -190,12 +190,12 @@ func (s *Server) deleteRealm(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		if err != nil {
 			return err
 		}
-		var targetIDs []string
-		rows, err := tx.Query(ctx, `SELECT DISTINCT target_id::text FROM subscriptions WHERE realm = $1`, name)
+		var workerIDs []string
+		rows, err := tx.Query(ctx, `SELECT DISTINCT worker_id::text FROM subscriptions WHERE realm = $1`, name)
 		if err != nil {
 			return err
 		}
-		if targetIDs, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
+		if workerIDs, err = pgx.CollectRows(rows, pgx.RowTo[string]); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT
@@ -224,8 +224,8 @@ func (s *Server) deleteRealm(w http.ResponseWriter, r *http.Request, p *auth.Pri
 					return err
 				}
 			}
-			if _, err := tx.Exec(ctx, `UPDATE targets SET subscriptions_revision = $2 WHERE id = ANY($1::uuid[])`,
-				targetIDs, rev); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE workers SET subscriptions_revision = $2 WHERE id = ANY($1::uuid[])`,
+				workerIDs, rev); err != nil {
 				return err
 			}
 		}
@@ -528,7 +528,7 @@ type keyView struct {
 	ID         string  `json:"id"`
 	Kind       string  `json:"kind"`
 	ClientID   *string `json:"client_id"`
-	TargetID   *string `json:"target_id"`
+	WorkerID   *string `json:"worker_id"`
 	Name       string  `json:"name"`
 	CreatedAt  string  `json:"created_at"`
 	ExpiresAt  *string `json:"expires_at"`
@@ -536,7 +536,7 @@ type keyView struct {
 	LastUsedAt *string `json:"last_used_at"`
 }
 
-const keySelect = `SELECT id, kind, client_id::text, target_id::text, name, created_at, expires_at, revoked_at,
+const keySelect = `SELECT id, kind, client_id::text, worker_id::text, name, created_at, expires_at, revoked_at,
 	last_used_at FROM api_keys`
 
 func scanKey(row pgx.Row) (keyView, error) {
@@ -545,7 +545,7 @@ func scanKey(row pgx.Row) (keyView, error) {
 		c         time.Time
 		e, rv, lu *time.Time
 	)
-	err := row.Scan(&v.ID, &v.Kind, &v.ClientID, &v.TargetID, &v.Name, &c, &e, &rv, &lu)
+	err := row.Scan(&v.ID, &v.Kind, &v.ClientID, &v.WorkerID, &v.Name, &c, &e, &rv, &lu)
 	v.CreatedAt, v.ExpiresAt, v.RevokedAt, v.LastUsedAt = ts(c), tsPtr(e), tsPtr(rv), tsPtr(lu)
 	return v, err
 }
@@ -570,7 +570,7 @@ type timeIDCursor struct {
 }
 
 func (s *Server) listKeys(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
-	if err := checkQuery(r, "kind", "client_id", "target_id", "limit", "cursor"); err != nil {
+	if err := checkQuery(r, "kind", "client_id", "worker_id", "limit", "cursor"); err != nil {
 		return err
 	}
 	page, err := parsePage(r)
@@ -589,7 +589,7 @@ func (s *Server) listKeys(w http.ResponseWriter, r *http.Request, _ *auth.Princi
 		}
 		where = append(where, "kind = "+arg(v))
 	}
-	for _, f := range []string{"client_id", "target_id"} {
+	for _, f := range []string{"client_id", "worker_id"} {
 		if v := q.Get(f); v != "" {
 			if !validUUID(v) {
 				return invalid(f, "must be a UUID")
@@ -649,13 +649,13 @@ type createdKeyView struct {
 
 // InsertKey creates a key of the given kind and returns it. Used by the API
 // and by the create-admin-key command.
-func InsertKey(ctx context.Context, q db.Querier, kind string, clientID, targetID *string, name string, expiresAt *time.Time) (auth.Key, error) {
+func InsertKey(ctx context.Context, q db.Querier, kind string, clientID, workerID *string, name string, expiresAt *time.Time) (auth.Key, error) {
 	key, err := auth.NewKey()
 	if err != nil {
 		return auth.Key{}, err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO api_keys (id, kind, client_id, target_id, name, secret_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, key.ID, kind, clientID, targetID, name, key.Hash(), expiresAt)
+	_, err = q.Exec(ctx, `INSERT INTO api_keys (id, kind, client_id, worker_id, name, secret_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, key.ID, kind, clientID, workerID, name, key.Hash(), expiresAt)
 	return key, err
 }
 
@@ -663,7 +663,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 	var req struct {
 		Kind      *string `json:"kind"`
 		ClientID  *string `json:"client_id"`
-		TargetID  *string `json:"target_id"`
+		WorkerID  *string `json:"worker_id"`
 		Name      *string `json:"name"`
 		ExpiresAt *string `json:"expires_at"`
 	}
@@ -682,19 +682,19 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 		if req.ClientID != nil {
 			fe.add("client_id", "not allowed for admin keys")
 		}
-		if req.TargetID != nil {
-			fe.add("target_id", "not allowed for admin keys")
+		if req.WorkerID != nil {
+			fe.add("worker_id", "not allowed for admin keys")
 		}
 	case auth.KindClient:
 		if req.ClientID == nil || !validUUID(*req.ClientID) {
 			fe.add("client_id", "required for client keys (a client id)")
 		}
-		if req.TargetID != nil {
-			fe.add("target_id", "not allowed for client keys")
+		if req.WorkerID != nil {
+			fe.add("worker_id", "not allowed for client keys")
 		}
 	case auth.KindWorker:
-		if req.TargetID == nil || !validUUID(*req.TargetID) {
-			fe.add("target_id", "required for worker keys (a target id)")
+		if req.WorkerID == nil || !validUUID(*req.WorkerID) {
+			fe.add("worker_id", "required for worker keys (a worker id)")
 		}
 		if req.ClientID != nil {
 			fe.add("client_id", "not allowed for worker keys")
@@ -722,12 +722,12 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 	ctx := r.Context()
 	var out createdKeyView
 	err := db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
-		key, err := InsertKey(ctx, tx, kind, req.ClientID, req.TargetID, *req.Name, expires)
+		key, err := InsertKey(ctx, tx, kind, req.ClientID, req.WorkerID, *req.Name, expires)
 		if db.IsForeignKeyViolation(err) {
 			if kind == auth.KindClient {
 				return invalid("client_id", "unknown client")
 			}
-			return invalid("target_id", "unknown target")
+			return invalid("worker_id", "unknown worker")
 		}
 		if err != nil {
 			return err
@@ -739,7 +739,7 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 		out = createdKeyView{keyView: *v, Key: key.String()}
 		return db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, ClientID: req.ClientID, Action: "key.create",
 			ObjectType: "api_key", ObjectID: key.ID, Details: map[string]any{"kind": kind, "name": *req.Name,
-				"client_id": req.ClientID, "target_id": req.TargetID, "expires_at": tsPtr(expires)}})
+				"client_id": req.ClientID, "worker_id": req.WorkerID, "expires_at": tsPtr(expires)}})
 	})
 	if err != nil {
 		return err
