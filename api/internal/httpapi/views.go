@@ -65,11 +65,12 @@ type adminEntryView struct {
 type stateContext struct {
 	targets []state.Target
 	rej     state.Rejections
+	rem     state.Removals
 	now     time.Time
 }
 
 func (c *stateContext) entryState(e *state.Entry) (string, []state.TargetState) {
-	return state.EntryState(e, c.targets, c.rej, c.now)
+	return state.EntryState(e, c.targets, c.rej, c.rem, c.now)
 }
 
 // loadStateContext loads targets, the rejections for the given entries'
@@ -81,7 +82,9 @@ func loadStateContext(ctx context.Context, q db.Querier, entries []state.Entry) 
 	}
 	seen := map[netip.Prefix]bool{}
 	prefixes := []netip.Prefix{}
+	ids := make([]string, 0, len(entries))
 	for _, e := range entries {
+		ids = append(ids, e.ID)
 		if !seen[e.Prefix] {
 			seen[e.Prefix] = true
 			prefixes = append(prefixes, e.Prefix)
@@ -91,11 +94,15 @@ func loadStateContext(ctx context.Context, q db.Querier, entries []state.Entry) 
 	if err != nil {
 		return nil, err
 	}
+	rem, err := db.LoadRemovals(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
 	now, err := db.Now(ctx, q)
 	if err != nil {
 		return nil, err
 	}
-	return &stateContext{targets: targets, rej: rej, now: now}, nil
+	return &stateContext{targets: targets, rej: rej, rem: rem, now: now}, nil
 }
 
 func clientTargets(per []state.TargetState) []clientTargetView {

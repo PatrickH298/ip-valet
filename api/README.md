@@ -85,7 +85,7 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days
 | `IPVALET_PURGE_INTERVAL` | `1h` | How often the purge job runs |
 | `IPVALET_SSE_HEARTBEAT` | `20s` | Interval between SSE `: ping` comments |
 | `IPVALET_CLIENT_EVENTS_RECHECK` | `30s` | How often client event streams re-evaluate state (catches expiries) |
-| `IPVALET_MAX_BODY_BYTES` | `65536` | Request body limit |
+| `IPVALET_MAX_BODY_BYTES` | `65536` | Request body limit. The largest valid worker status report (200 rejections) is about 59 KB; below 61440 the server logs a warning at startup |
 | `IPVALET_SHUTDOWN_TIMEOUT` | `15s` | Grace period for in-flight requests on shutdown |
 | `IPVALET_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 

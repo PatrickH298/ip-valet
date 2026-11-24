@@ -51,6 +51,11 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 		return nil, fmt.Errorf("migrations: %w", err)
 	}
 
+	if cfg.MaxBodyBytes < httpapi.MaxStatusReportBytes {
+		log.Warn("IPVALET_MAX_BODY_BYTES is below what a status report at its limits needs; "+
+			"workers reporting many rejections may get 413", "max_body_bytes", cfg.MaxBodyBytes,
+			"needed", httpapi.MaxStatusReportBytes)
+	}
 	a := &App{Config: cfg, Log: log, Pool: pool, Hub: events.NewHub()}
 	bgCtx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel

@@ -60,15 +60,95 @@ func GetEntry(ctx context.Context, q Querier, id string, forUpdate bool) (*state
 	return &e, nil
 }
 
-// SoftDeleteEntries marks entries deleted at revision rev.
+// TargetMatchesEntry is true when target t applies entry e: t holds e's
+// address family and has a subscription matching e's realm, user and group.
+const TargetMatchesEntry = `((family(e.prefix) = 4 AND t.ipv4) OR (family(e.prefix) = 6 AND t.ipv6))
+	AND EXISTS (SELECT 1 FROM subscriptions s WHERE s.target_id = t.id
+	    AND (s.realm    IS NULL OR s.realm    = e.realm)
+	    AND (s.username IS NULL OR s.username = e.username)
+	    AND (s.grp      IS NULL OR s.grp      = e.grp))`
+
+// recordRemovals upserts entry_removals rows, keeping the later revision.
+const recordRemovals = `ON CONFLICT (entry_id, target_id)
+	DO UPDATE SET revision = GREATEST(entry_removals.revision, EXCLUDED.revision)`
+
+// SoftDeleteEntries marks entries deleted at revision rev. First it records,
+// for every target that matches each entry now, that the target must reach
+// rev to confirm the removal. Call it before any change in the same
+// transaction that stops targets matching these entries.
 func SoftDeleteEntries(ctx context.Context, q Querier, ids []string, actor string, rev int64) error {
 	if len(ids) == 0 {
 		return nil
+	}
+	if _, err := q.Exec(ctx, `
+		INSERT INTO entry_removals (entry_id, target_id, revision)
+		SELECT e.id, t.id, $2 FROM entries e JOIN targets t ON `+TargetMatchesEntry+`
+		WHERE e.id = ANY($1::uuid[]) AND e.deleted_at IS NULL
+		`+recordRemovals, ids, rev); err != nil {
+		return err
 	}
 	_, err := q.Exec(ctx, `
 		UPDATE entries SET deleted_at = now(), deleted_by = $2, deleted_revision = $3, updated_at = now()
 		WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`, ids, actor, rev)
 	return err
+}
+
+// EntriesHeldBy returns the entries a target matches that are not deleted,
+// expired ones included (its worker may not have removed them yet).
+func EntriesHeldBy(ctx context.Context, q Querier, targetID string) ([]state.Entry, error) {
+	return QueryEntries(ctx, q, `SELECT `+EntryCols+` FROM entries e JOIN targets t ON t.id = $1
+		WHERE e.deleted_at IS NULL AND `+TargetMatchesEntry+`
+		ORDER BY e.created_at, e.id`, targetID)
+}
+
+// RecordStoppedMatching records, for each of ids that the target no longer
+// matches, that the target must reach rev to confirm removing it. It returns
+// how many entries stopped matching. A deleted target records nothing.
+func RecordStoppedMatching(ctx context.Context, q Querier, targetID string, ids []string, rev func() (int64, error)) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	rows, err := q.Query(ctx, `SELECT e.id::text FROM entries e JOIN targets t ON t.id = $1
+		WHERE e.id = ANY($2::uuid[]) AND NOT (`+TargetMatchesEntry+`)`, targetID, ids)
+	if err != nil {
+		return 0, err
+	}
+	stopped, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil || len(stopped) == 0 {
+		return 0, err
+	}
+	r, err := rev()
+	if err != nil {
+		return 0, err
+	}
+	_, err = q.Exec(ctx, `INSERT INTO entry_removals (entry_id, target_id, revision)
+		SELECT unnest($1::uuid[]), $2, $3 `+recordRemovals, stopped, targetID, r)
+	return len(stopped), err
+}
+
+// LoadRemovals loads the entry_removals rows for the given entries.
+func LoadRemovals(ctx context.Context, q Querier, entryIDs []string) (state.Removals, error) {
+	rem := state.Removals{}
+	if len(entryIDs) == 0 {
+		return rem, nil
+	}
+	rows, err := q.Query(ctx, `SELECT entry_id::text, target_id::text, revision FROM entry_removals
+		WHERE entry_id = ANY($1::uuid[])`, entryIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			e, t string
+			rev  int64
+		)
+		if err := rows.Scan(&e, &t, &rev); err != nil {
+			return nil, err
+		}
+		rem.Add(e, t, rev)
+	}
+	return rem, rows.Err()
 }
 
 // LoadTargets loads every target with its subscriptions, sorted by label then id.

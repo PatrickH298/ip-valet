@@ -9,6 +9,17 @@ import (
 	"github.com/PatrickH298/ip-valet/api/internal/testutil"
 )
 
+// impactItems returns impact items keyed by entry id.
+func impactItems(t *testing.T, list any) map[string]map[string]any {
+	t.Helper()
+	out := map[string]map[string]any{}
+	for _, it := range list.([]any) {
+		m := it.(map[string]any)
+		out[m["entry_id"].(string)] = m
+	}
+	return out
+}
+
 func TestImpactCheck(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
@@ -25,32 +36,35 @@ func TestImpactCheck(t *testing.T) {
 	if r.Status != 409 || r.Code(t) != "confirmation_required" {
 		t.Fatalf("unconfirmed: %d %s", r.Status, r.Body)
 	}
-	impact := r.JSON(t)["error"].(map[string]any)["impact"].([]any)
-	if len(impact) != 2 {
-		t.Fatalf("impact = %v", impact)
+	items := impactItems(t, r.JSON(t)["error"].(map[string]any)["impact"])
+	if len(items) != 2 {
+		t.Fatalf("impact = %v", items)
 	}
-	for _, it := range impact {
-		m := it.(map[string]any)
-		if m["effect"] != "ttl_exceeded" || (m["entry_id"] != e1 && m["entry_id"] != e2) {
-			t.Fatalf("impact item %v", m)
+	for _, id := range []string{e1, e2} {
+		if it := items[id]; it["effect"] != "ttl_exceeded" || it["action"] != "shorten" {
+			t.Fatalf("impact item %v", it)
 		}
 	}
 	if h.RulesOf("r", "ttl")[0]["max_ttl"] != "30d" {
 		t.Fatal("rule changed by an unconfirmed request")
 	}
+	// There is no way to keep entries that fail a rule.
+	if r := h.Do("PATCH", path+"?confirm=true&on_existing=keep", h.AdminKey, tighten); r.Status != 400 {
+		t.Fatalf("on_existing accepted: %d", r.Status)
+	}
 
 	// Dry run: 200 with impact; nothing changes.
 	rev := h.Revision()
 	dry := h.Admin(200, "PATCH", path+"?dry_run=true", tighten)
-	if len(dry["impact"].([]any)) != 2 || dry["max_ttl"] != "1d" {
+	if len(dry["impact"].([]any)) != 2 || dry["max_ttl"] != "1d" || dry["dry_run"] != true {
 		t.Fatalf("dry run = %v", dry)
 	}
 	if h.RulesOf("r", "ttl")[0]["max_ttl"] != "30d" || h.Revision() != rev {
 		t.Fatal("dry run changed something")
 	}
 
-	// Confirmed and enforced: both shortened, the revision bumped once.
-	out := h.Admin(200, "PATCH", path+"?confirm=true&on_existing=enforce", tighten)
+	// Confirmed: both shortened, the revision bumped once.
+	out := h.Admin(200, "PATCH", path+"?confirm=true", tighten)
 	enf := out["enforced"].(map[string]any)
 	if enf["shortened"].(float64) != 2 || enf["removed"].(float64) != 0 || len(out["impact"].([]any)) != 2 {
 		t.Fatalf("enforced = %v", out)
@@ -72,60 +86,80 @@ func TestImpactCheck(t *testing.T) {
 		t.Fatal("unaffected entry was touched")
 	}
 
-	// Removal: a deny rule above everything, confirmed with enforce.
+	// An IP rule that now denies entries removes them.
 	rev = h.Revision()
-	out = h.Admin(201, "POST", "/v1/admin/realms/r/rules/ip?confirm=true&on_existing=enforce", map[string]any{
+	out = h.Admin(201, "POST", "/v1/admin/realms/r/rules/ip?confirm=true", map[string]any{
 		"user": "*", "group": "*", "prefix": "8.8.0.0/16", "action": "deny", "position": 1})
-	if enf := out["enforced"].(map[string]any); enf["removed"].(float64) != 2 {
+	if enf := out["enforced"].(map[string]any); enf["removed"].(float64) != 2 || enf["shortened"].(float64) != 0 {
 		t.Fatalf("enforced = %v", out)
+	}
+	for id, it := range impactItems(t, out["impact"]) {
+		if (id != e1 && id != e2) || it["effect"] != "ip_denied" || it["action"] != "remove" {
+			t.Fatalf("impact item %v", it)
+		}
 	}
 	if h.Revision() != rev+1 {
 		t.Fatalf("revision %d, want %d", h.Revision(), rev+1)
 	}
 	for _, id := range []string{e1, e2} {
-		if e := adminEntry(h, id); e["deleted_at"] == nil || e["deleted_by"] == nil {
+		if e := adminEntry(h, id); e["deleted_at"] == nil || e["deleted_by"] == nil || e["state"] != "removing" {
 			t.Fatalf("not removed: %v", e)
 		}
 	}
 
-	// keep (the default) leaves entries alone and does not bump.
-	rev = h.Revision()
-	out = h.Admin(201, "POST", "/v1/admin/realms/r/rules/ip?confirm=true", map[string]any{
-		"user": "*", "group": "*", "prefix": "1.1.1.0/24", "action": "deny", "position": 1})
-	if enf := out["enforced"].(map[string]any); enf["removed"].(float64) != 0 || len(out["impact"].([]any)) != 1 {
-		t.Fatalf("keep = %v", out)
+	// A cap removes the least recently submitted prefixes over the limit.
+	z1 := firstEntryID(submitOK(h, s.ClientKey, sub("z", "9.9.9.1", "1h", "g")))
+	z2 := firstEntryID(submitOK(h, s.ClientKey, sub("z", "9.9.9.2", "1h", "g")))
+	z3 := submitOK(h, s.ClientKey, sub("z", "9.9.9.3", "1h", "g", "h"))
+	submitOK(h, s.ClientKey, sub("z", "9.9.9.1", "1h", "g")) // the most recent now
+	out = h.Admin(201, "POST", "/v1/admin/realms/r/rules/cap?confirm=true", map[string]any{
+		"user": "*", "group": "*", "max_prefixes": 2})
+	items = impactItems(t, out["impact"])
+	if len(items) != 1 || items[z2]["effect"] != "cap_exceeded" || items[z2]["action"] != "remove" {
+		t.Fatalf("cap impact = %v", items)
 	}
-	if e := adminEntry(h, e3); e["deleted_at"] != nil || h.Revision() != rev {
-		t.Fatal("keep changed the entry or the revision")
+	if e := adminEntry(h, z2); e["deleted_at"] == nil {
+		t.Fatal("oldest prefix kept")
 	}
-	// The entry already fails ip_denied, so a further change adds no impact for it.
-	h.Admin(201, "POST", "/v1/admin/realms/r/rules/ip", map[string]any{
-		"user": "*", "group": "*", "prefix": "1.1.0.0/16", "action": "deny", "position": 1})
-
-	// Caps are reported, never enforced.
-	submitOK(h, s.ClientKey, sub("z", "9.9.9.1", "1h", "g"))
-	submitOK(h, s.ClientKey, sub("z", "9.9.9.2", "1h", "g"))
-	out = h.Admin(201, "POST", "/v1/admin/realms/r/rules/cap?confirm=true&on_existing=enforce", map[string]any{
-		"user": "*", "group": "*", "max_prefixes": 1})
-	if enf := out["enforced"].(map[string]any); enf["removed"].(float64) != 0 || len(out["impact"].([]any)) != 2 {
-		t.Fatalf("cap = %v", out)
+	for _, id := range []string{z1, firstEntryID(z3), z3["entries"].([]any)[1].(map[string]any)["id"].(string)} {
+		if e := adminEntry(h, id); e["deleted_at"] != nil {
+			t.Fatalf("recent prefix removed: %v", e)
+		}
 	}
 
-	// Subscription deletion goes through the impact check (unrouted).
+	// No entry is left failing a rule: a no-op change finds nothing to do.
+	var ids []string
+	for _, rr := range h.RulesOf("r", "ip") {
+		ids = append(ids, rr["id"].(string))
+	}
+	if dry := h.Admin(200, "PUT", "/v1/admin/realms/r/rules/ip/order?dry_run=true", map[string]any{"ids": ids}); len(dry["impact"].([]any)) != 0 {
+		t.Fatalf("entries still fail a rule: %v", dry["impact"])
+	}
+
+	// Deleting the only subscription leaves the realm's entries unrouted. They
+	// fail no rule, so they stay.
 	subs := h.Admin(200, "GET", "/v1/admin/targets/"+s.TargetID+"/subscriptions", nil)["items"].([]any)
 	subPath := "/v1/admin/subscriptions/" + subs[0].(map[string]any)["id"].(string)
-	if r := h.Do("DELETE", subPath, h.AdminKey, nil); r.Status != 409 {
+	r = h.Do("DELETE", subPath, h.AdminKey, nil)
+	if r.Status != 409 {
 		t.Fatalf("subscription delete: %d %s", r.Status, r.Body)
 	}
-	rev = h.Revision()
-	out = h.Admin(200, "DELETE", subPath+"?confirm=true&on_existing=enforce", nil)
-	if out["enforced"].(map[string]any)["removed"].(float64) < 1 || h.Revision() != rev+1 {
-		t.Fatalf("subscription delete enforced = %v (revision %d -> %d)", out, rev, h.Revision())
-	}
-	for _, it := range out["impact"].([]any) {
-		if it.(map[string]any)["effect"] != "unrouted" {
+	for _, it := range impactItems(t, r.JSON(t)["error"].(map[string]any)["impact"]) {
+		if it["effect"] != "unrouted" || it["action"] != "none" {
 			t.Fatalf("impact %v", it)
 		}
+	}
+	rev = h.Revision()
+	out = h.Admin(200, "DELETE", subPath+"?confirm=true", nil)
+	if out["enforced"].(map[string]any)["removed"].(float64) != 0 || h.Revision() != rev+1 {
+		t.Fatalf("subscription delete = %v (revision %d -> %d)", out, rev, h.Revision())
+	}
+	if st, per := entryState(h, z1); st != "unrouted" || per["home-r"] != "removing" {
+		t.Fatalf("unrouted entry: %s %v", st, per)
+	}
+	h.Apply(s.WorkerKey)
+	if st, per := entryState(h, z1); st != "unrouted" || len(per) != 0 {
+		t.Fatalf("unrouted entry after the worker confirmed: %s %v", st, per)
 	}
 }
 
@@ -152,8 +186,13 @@ func TestTargetFamilyChangeImpact(t *testing.T) {
 	if h.Revision() != rev+1 || int64(out["subscriptions_revision"].(float64)) != rev+1 {
 		t.Fatalf("family change revision: %v", out)
 	}
-	if st, _ := entryState(h, v6); st != "unrouted" {
-		t.Fatalf("v6 entry: %s", st)
+	// The target dropped the entry; it reads removing there until the worker confirms.
+	if st, per := entryState(h, v6); st != "unrouted" || per["home-r"] != "removing" {
+		t.Fatalf("v6 entry: %s %v", st, per)
+	}
+	h.Apply(s.WorkerKey)
+	if st, per := entryState(h, v6); st != "unrouted" || len(per) != 0 {
+		t.Fatalf("v6 entry after the worker confirmed: %s %v", st, per)
 	}
 	if r := h.Do("DELETE", path, h.AdminKey, nil); r.Status != 409 {
 		t.Fatalf("target delete: %d", r.Status)
@@ -164,10 +203,10 @@ func TestTargetFamilyChangeImpact(t *testing.T) {
 func TestRealmDeletion(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
+	// home-doomed subscribes to the realm by name, so its subscription goes
+	// with the realm; wild subscribes to every realm and keeps matching.
 	s := h.Basic("doomed")
 	h.CreateRealm("kept")
-	// A wildcard-realm subscription still matches the realm's entries after the
-	// realm-specific one is deleted with the realm.
 	wild := h.CreateTarget("wild", true, true)
 	h.Subscribe(wild, "*", "*", "*")
 	wk := h.WorkerKey(wild)
@@ -198,12 +237,18 @@ func TestRealmDeletion(t *testing.T) {
 	if r := h.Do("GET", "/v1/admin/realms/doomed", h.AdminKey, nil); r.Status != 404 {
 		t.Errorf("realm still readable: %d", r.Status)
 	}
-	if st, per := entryState(h, id); st != "removing" || per["wild"] != "removing" {
+	// Both targets held the entry; it is removing until each worker confirms,
+	// even on the target whose subscription went with the realm.
+	if st, per := entryState(h, id); st != "removing" || per["home-doomed"] != "removing" || per["wild"] != "removing" {
 		t.Fatalf("after realm deletion: %s %v", st, per)
+	}
+	h.Apply(s.WorkerKey)
+	if st, per := entryState(h, id); st != "removing" || per["home-doomed"] != "removed" || per["wild"] != "removing" {
+		t.Fatalf("after one worker confirmed: %s %v", st, per)
 	}
 	h.Apply(wk)
 	if st, _ := entryState(h, id); st != "removed" {
-		t.Fatalf("after the worker confirmed: %s", st)
+		t.Fatalf("after both workers confirmed: %s", st)
 	}
 	// The client keeps working in its other realm.
 	h.Must(200, "GET", "/v1/entries", s.ClientKey, nil)
@@ -213,6 +258,47 @@ func TestRealmDeletion(t *testing.T) {
 	h.Admin(200, "DELETE", "/v1/admin/realms/kept", nil)
 	if r := h.Do("GET", "/v1/entries", lk, nil); r.Status != 403 || r.Code(t) != "realm_not_allowed" {
 		t.Fatalf("client without realms: %d %s", r.Status, r.Body)
+	}
+}
+
+func TestRemovalAfterSubscriptionChanges(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	h.CreateRealm("r")
+	a := h.CreateTarget("alpha", true, true)
+	b := h.CreateTarget("beta", true, true)
+	h.Subscribe(a, "r", "*", "*")
+	subB := h.Subscribe(b, "r", "*", "*")
+	key := h.ClientKey(h.CreateClient("web", "r"))
+	wa, wb := h.WorkerKey(a), h.WorkerKey(b)
+	deleted := firstEntryID(submitOK(h, key, sub("p", "8.8.8.8", "1d", "g")))
+	live := firstEntryID(submitOK(h, key, sub("p", "8.8.4.4", "1d", "g")))
+	h.Apply(wa)
+	h.Apply(wb)
+
+	// Delete one entry, then beta's subscription, before either worker catches up.
+	h.Must(200, "DELETE", "/v1/entries/"+deleted, key, nil)
+	h.Admin(200, "DELETE", "/v1/admin/subscriptions/"+subB, nil) // alpha still routes everything
+	if st, per := entryState(h, deleted); st != "removing" || per["alpha"] != "removing" || per["beta"] != "removing" {
+		t.Fatalf("deleted entry: %s %v", st, per)
+	}
+	// The live entry stays active on alpha and reads removing on beta.
+	if st, per := entryState(h, live); st != "active" || per["alpha"] != "active" || per["beta"] != "removing" {
+		t.Fatalf("live entry: %s %v", st, per)
+	}
+	h.Apply(wb)
+	if st, per := entryState(h, deleted); st != "removing" || per["beta"] != "removed" || per["alpha"] != "removing" {
+		t.Fatalf("after beta confirmed: %s %v", st, per)
+	}
+	if _, per := entryState(h, live); len(per) != 1 || per["alpha"] == "" {
+		t.Fatalf("live entry after beta confirmed: %v", per)
+	}
+	h.Apply(wa)
+	if st, _ := entryState(h, deleted); st != "removed" {
+		t.Fatalf("after both confirmed: %s", st)
+	}
+	if st, _ := entryState(h, live); st != "active" {
+		t.Fatalf("live entry: %s", st)
 	}
 }
 

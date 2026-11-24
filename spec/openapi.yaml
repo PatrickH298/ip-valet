@@ -27,6 +27,31 @@ info:
 
     **Codes.** Clients act on `error.code`, never on `message`. Codes may be
     added in later versions; a code's meaning never changes.
+
+    **The impact check.** Rule changes of any kind, subscription deletion,
+    target deletion and target family changes work out what they do to
+    existing live, unexpired entries. No entry is ever left failing a rule:
+
+    - IP or prefix rule now rejects it: the entry is removed.
+    - Over a cap: for each user and cap rule, the most recently submitted
+      prefixes are kept up to the limit, and the entries holding the others
+      are removed.
+    - Over a TTL rule (lifetime left longer than the max, or unlimited under a
+      finite max): the entry is shortened to now plus the max.
+    - No target matches it any more (routing changes): it fails no rule, so it
+      stays, reading `unrouted`.
+
+    With `dry_run=true` the change is applied and rolled back and the response
+    lists the impact. A change with impact and without `confirm=true` is 409
+    `confirmation_required`, listing the impact. With `confirm=true` the
+    change and every action are saved in one transaction with at most one
+    revision bump.
+
+    **Removal.** When an entry is deleted, or a target stops matching it, the
+    server records which targets held it. The entry reads `removing` until
+    each of them confirms by applying a later revision (or, for an expired
+    entry, a desired state generated after the expiry), even if the target no
+    longer matches it.
   license:
     name: AGPL-3.0-only
     identifier: AGPL-3.0-only
@@ -535,10 +560,10 @@ paths:
       summary: Delete a realm
       description: |
         Soft-deletes the realm's live entries (one revision bump; they read
-        `removing` until each still-matching target confirms) and deletes its
-        rules, client bindings and subscriptions, bumping
-        `subscriptions_revision` on the affected targets. Needs no
-        confirmation. A client left with no realm gets 403
+        `removing` until every target that held them confirms, including
+        targets whose subscriptions go with the realm) and deletes its rules,
+        client bindings and subscriptions, bumping `subscriptions_revision` on
+        the affected targets. Needs no confirmation. A client left with no realm gets 403
         `realm_not_allowed` on every call.
       security: [{ adminKey: [] }]
       responses:
@@ -604,7 +629,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       requestBody:
         required: true
         content:
@@ -647,7 +671,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       requestBody:
         required: true
         content:
@@ -697,7 +720,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       requestBody:
         required: true
         content:
@@ -728,7 +750,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       responses:
         "200":
           description: The deleted rule.
@@ -959,7 +980,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       requestBody:
         required: true
         content:
@@ -998,7 +1018,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       responses:
         "200":
           description: The deleted target.
@@ -1090,7 +1109,6 @@ paths:
       parameters:
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
-        - $ref: "#/components/parameters/OnExisting"
       responses:
         "200":
           description: The deleted subscription.
@@ -1510,23 +1528,16 @@ components:
     DryRun:
       name: dry_run
       in: query
-      description: Apply the change, report its impact and warnings, then roll back.
+      description: Apply the change, report its impact (with the action each entry would get) and warnings, then roll back.
       schema: { type: boolean, default: false }
     Confirm:
       name: confirm
       in: query
-      description: Save the change even though it affects existing entries.
-      schema: { type: boolean, default: false }
-    OnExisting:
-      name: on_existing
-      in: query
       description: |
-        With `confirm=true`: `keep` (default) leaves affected entries alone;
-        `enforce` shortens entries over a tightened TTL to now plus the max,
-        and soft-deletes entries that are now `ip_denied`, `prefix_too_broad`
-        or `unrouted`, in the same transaction and with one revision bump. Cap
-        overruns are reported, never acted on.
-      schema: { type: string, enum: [keep, enforce], default: keep }
+        Save the change together with its action on every affected entry
+        (see the impact check). Without it, a change that affects entries is
+        409 `confirmation_required`.
+      schema: { type: boolean, default: false }
 
   responses:
     InvalidRequest:
@@ -1666,12 +1677,18 @@ components:
         `active`: every matching target applied it. `pending`: a matching
         target has not caught up. `partial`: some targets rejected it, the rest
         applied it. `rejected`: every matching target rejected it. `unrouted`:
-        no target matches it (only after a configuration change). `removing`:
-        deleted or expired, but a target has not confirmed removal. `removed`:
-        deleted and confirmed. `expired`: expired and confirmed.
+        no target matches it (only after a routing change). `removing`:
+        deleted or expired, but a target that held it has not confirmed
+        removal. `removed`: deleted and confirmed. `expired`: expired and
+        confirmed.
       enum: [active, pending, partial, rejected, unrouted, removing, removed, expired]
     TargetEntryState:
       type: string
+      description: |
+        An entry's state on one target. A live entry also lists, as
+        `removing`, a target that stopped matching it and has not yet
+        confirmed removing it; such a target does not count towards the
+        entry's overall state.
       enum: [active, pending, rejected, removing, removed, expired]
     ErrorCode:
       type: string
@@ -1713,6 +1730,13 @@ components:
     ImpactEffect:
       type: string
       enum: [unrouted, ip_denied, prefix_too_broad, ttl_exceeded, cap_exceeded]
+    ImpactAction:
+      type: string
+      description: |
+        `remove`: soft-deleted (`ip_denied`, `prefix_too_broad`,
+        `cap_exceeded`). `shorten`: expiry set to now plus the TTL rule's max
+        (`ttl_exceeded`). `none`: the entry stays (`unrouted`).
+      enum: [remove, shorten, none]
 
     # ---------- errors
 
@@ -1937,7 +1961,11 @@ components:
               description: The `generated_at` of the desired state applied (or the `IPValet-Generated-At` of a 304); not in the future.
             rejected:
               type: array
-              maxItems: 10000
+              maxItems: 200
+              description: |
+                At most 200 items with details of at most 200 characters, so
+                that the largest report (about 59 KB) fits in the default 64 KiB
+                body limit. A worker with more rejections reports an error.
               items:
                 type: object
                 additionalProperties: false
@@ -1945,7 +1973,7 @@ components:
                 properties:
                   prefix: { $ref: "#/components/schemas/Prefix" }
                   code: { $ref: "#/components/schemas/WorkerRejectionCode" }
-                  detail: { type: string, maxLength: 1000, description: Shown to admins only. }
+                  detail: { type: string, maxLength: 200, description: Shown to admins only. }
         - type: object
           title: Failure
           additionalProperties: false
@@ -1975,10 +2003,11 @@ components:
           description: With `cross_realm_selector`.
     ImpactItem:
       type: object
-      required: [entry_id, realm, user, group, prefix, effect]
+      required: [entry_id, realm, user, group, prefix, effect, action]
       description: |
-        A live, unexpired entry that the change makes fail a check it did not
-        fail before; `effect` is the first such check.
+        A live, unexpired entry the change affects, the rule it would fail
+        (`effect`) and what a confirmed change does to it (`action`). Each
+        entry appears at most once.
       properties:
         entry_id: { $ref: "#/components/schemas/UUID" }
         realm: { $ref: "#/components/schemas/RealmName" }
@@ -1986,6 +2015,7 @@ components:
         group: { $ref: "#/components/schemas/Ident" }
         prefix: { $ref: "#/components/schemas/Prefix" }
         effect: { $ref: "#/components/schemas/ImpactEffect" }
+        action: { $ref: "#/components/schemas/ImpactAction" }
     MutationExtras:
       type: object
       description: Fields added to every admin mutation response.
@@ -2000,7 +2030,7 @@ components:
           items: { $ref: "#/components/schemas/ImpactItem" }
         enforced:
           type: object
-          description: With `confirm=true`.
+          description: With `confirm=true`, how many entries the change shortened and removed.
           required: [shortened, removed]
           properties:
             shortened: { type: integer, minimum: 0 }
@@ -2229,6 +2259,10 @@ components:
       allOf:
         - $ref: "#/components/schemas/RuleCommon"
         - type: object
+          description: |
+            A submitted TTL must not exceed `max_ttl` (`unlimited` allows any).
+            An existing entry exceeds it when its lifetime left is longer than
+            `max_ttl`, or it is unlimited under a finite `max_ttl`.
           required: [list, max_ttl]
           properties:
             list: { const: ttl }

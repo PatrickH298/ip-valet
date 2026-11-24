@@ -150,30 +150,66 @@ type TargetState struct {
 	Code   string // rejection code when State is rejected
 }
 
+// Removals holds entry_removals rows: entry id → target id → the revision
+// from which that target no longer holds the entry.
+type Removals map[string]map[string]int64
+
+// Add records a removal row.
+func (r Removals) Add(entryID, targetID string, rev int64) {
+	m := r[entryID]
+	if m == nil {
+		m = map[string]int64{}
+		r[entryID] = m
+	}
+	m[targetID] = rev
+}
+
+// confirmedGone reports whether target t has removed entry e, given the
+// revision from which t no longer holds it. An expired entry also leaves a
+// target once the target has applied a desired state generated after the
+// expiry, since expiry bumps no revision.
+func confirmedGone(e *Entry, t *Target, rev int64) bool {
+	if t.AppliedRevision >= rev {
+		return true
+	}
+	return e.ExpiresAt != nil && t.AppliedGeneratedAt != nil && !t.AppliedGeneratedAt.Before(*e.ExpiresAt)
+}
+
 // EntryState computes an entry's overall state and its per-target states.
 // targets must already be sorted with SortTargets.
-func EntryState(e *Entry, targets []Target, rej Rejections, now time.Time) (string, []TargetState) {
-	var matched []*Target
-	for i := range targets {
-		if targets[i].Routes(e.Realm, e.User, e.Group, e.Prefix) {
-			matched = append(matched, &targets[i])
-		}
-	}
+//
+// A live entry is judged by the targets that match it now. An ended entry is
+// judged by every target that held it: for a deleted entry, the targets on
+// record in rem (written when it was deleted, or earlier when a target
+// stopped matching it); for an expired entry, the targets that match it now
+// plus those on record. A target that stopped matching a live entry is listed
+// as removing until it confirms, without affecting the overall state.
+func EntryState(e *Entry, targets []Target, rej Rejections, rem Removals, now time.Time) (string, []TargetState) {
+	rows := rem[e.ID]
 
-	// Ended entries: removing until every matching target has confirmed.
 	if e.Ended(now) {
 		final := Removed
 		if e.DeletedRevision == nil {
 			final = Expired
 		}
 		overall := final
-		per := make([]TargetState, 0, len(matched))
-		for _, t := range matched {
+		var per []TargetState
+		for i := range targets {
+			t := &targets[i]
+			rev, onRecord := rows[t.ID]
 			var gone bool
-			if e.DeletedRevision != nil {
-				gone = t.AppliedRevision >= *e.DeletedRevision
-			} else {
+			switch {
+			case e.DeletedRevision != nil:
+				if !onRecord {
+					continue
+				}
+				gone = confirmedGone(e, t, rev)
+			case t.Routes(e.Realm, e.User, e.Group, e.Prefix):
 				gone = t.AppliedGeneratedAt != nil && !t.AppliedGeneratedAt.Before(*e.ExpiresAt)
+			case onRecord:
+				gone = confirmedGone(e, t, rev)
+			default:
+				continue
 			}
 			s := final
 			if !gone {
@@ -185,13 +221,19 @@ func EntryState(e *Entry, targets []Target, rej Rejections, now time.Time) (stri
 		return overall, per
 	}
 
-	if len(matched) == 0 {
-		return Unrouted, nil
-	}
-
-	per := make([]TargetState, 0, len(matched))
-	var nPending, nRejected int
-	for _, t := range matched {
+	var (
+		per                           []TargetState
+		nMatched, nPending, nRejected int
+	)
+	for i := range targets {
+		t := &targets[i]
+		if !t.Routes(e.Realm, e.User, e.Group, e.Prefix) {
+			if rev, onRecord := rows[t.ID]; onRecord && !confirmedGone(e, t, rev) {
+				per = append(per, TargetState{Target: t, State: Removing})
+			}
+			continue
+		}
+		nMatched++
 		need := max(e.Revision, t.SubscriptionsRevision)
 		switch code, rejected := rej.Code(t.ID, e.Prefix); {
 		case t.AppliedRevision < need:
@@ -205,9 +247,11 @@ func EntryState(e *Entry, targets []Target, rej Rejections, now time.Time) (stri
 		}
 	}
 	switch {
+	case nMatched == 0:
+		return Unrouted, per
 	case nPending > 0:
 		return Pending, per
-	case nRejected == len(per):
+	case nRejected == nMatched:
 		return Rejected, per
 	case nRejected > 0:
 		return Partial, per

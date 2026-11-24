@@ -147,7 +147,14 @@ type statusResponse struct {
 	AppliedRevision int64 `json:"applied_revision"`
 }
 
-const maxRejected = 10000
+// Status report limits. A report at these limits, with the longest prefixes
+// and codes and ASCII details, is about 59 KB, so it fits in the default
+// 64 KiB body limit; MaxStatusReportBytes is the body limit it needs.
+const (
+	maxRejected          = 200
+	maxDetailChars       = 200
+	MaxStatusReportBytes = 60 * 1024
+)
 
 func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	var req statusRequest
@@ -213,8 +220,8 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 			fe.add(field+".code", "must be one of "+strings.Join(state.WorkerCodes, ", "))
 			continue
 		}
-		if it.Detail != nil && utf8.RuneCountInString(*it.Detail) > 1000 {
-			fe.add(field+".detail", "must be at most 1000 characters")
+		if it.Detail != nil && utf8.RuneCountInString(*it.Detail) > maxDetailChars {
+			fe.add(field+".detail", fmt.Sprintf("must be at most %d characters", maxDetailChars))
 			continue
 		}
 		if seen[pfx] {

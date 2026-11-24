@@ -512,3 +512,35 @@ func TestClientEvents(t *testing.T) {
 		t.Fatalf("after expiry: %+v", ev)
 	}
 }
+
+func TestStatusReportLimits(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	s := h.Basic("r")
+	gen := h.DesiredState(s.WorkerKey).JSON(t)["generated_at"].(string)
+	report := func(n, detailLen int) map[string]any {
+		items := make([]map[string]any, n)
+		for i := range items {
+			items[i] = map[string]any{
+				"prefix": fmt.Sprintf("ffff:ffff:ffff:ffff:ffff:ffff:ffff:%04x/128", 0x1000+i),
+				"code":   "address_not_allowed", "detail": strings.Repeat("x", detailLen)}
+		}
+		return map[string]any{"worker_id": strings.Repeat("w", 128), "version": strings.Repeat("v", 64),
+			"revision": h.Revision(), "generated_at": gen, "rejected": items}
+	}
+	// The largest valid report fits in the default body limit.
+	largest := report(200, 200)
+	body, _ := json.Marshal(largest)
+	if len(body) > 65536 {
+		t.Fatalf("the largest valid report is %d bytes", len(body))
+	}
+	h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, largest)
+	if n := len(h.Admin(200, "GET", "/v1/admin/targets/"+s.TargetID+"/health", nil)["rejections"].([]any)); n != 200 {
+		t.Fatalf("%d rejections stored", n)
+	}
+	for _, bad := range []map[string]any{report(201, 10), report(1, 201)} {
+		if r := h.Do("POST", "/v1/worker/status", s.WorkerKey, bad); r.Status != 400 || r.Code(t) != "invalid_request" {
+			t.Fatalf("over the limits: %d %s", r.Status, r.Body)
+		}
+	}
+}
