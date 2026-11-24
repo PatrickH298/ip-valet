@@ -1,0 +1,98 @@
+package config
+
+import (
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/PatrickH298/ip-valet/api/internal/auth"
+)
+
+func env(m map[string]string) Getenv {
+	return func(k string) (string, bool) { v, ok := m[k]; return v, ok }
+}
+
+func files(m map[string]string) ReadFile {
+	return func(p string) ([]byte, error) {
+		if v, ok := m[p]; ok {
+			return []byte(v), nil
+		}
+		return nil, os.ErrNotExist
+	}
+}
+
+func TestDefaults(t *testing.T) {
+	c, err := Load(env(map[string]string{"IPVALET_DATABASE_URL": "postgres://x"}), files(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DBMaxConns != 10 || c.ListenAddr != ":8080" || c.MetricsAddr != ":9090" || c.DefaultTTL != 30*24*time.Hour ||
+		c.DefaultPrefixV4 != 32 || c.DefaultPrefixV6 != 64 || c.DefaultRateLimit != 0 ||
+		c.RetentionEntries != 90*24*time.Hour || c.RetentionAudit != 365*24*time.Hour || c.PurgeInterval != time.Hour ||
+		c.SSEHeartbeat != 20*time.Second || c.ClientEventsRecheck != 30*time.Second || c.MaxBodyBytes != 65536 ||
+		c.ShutdownTimeout != 15*time.Second || c.AdminKeyID != "" {
+		t.Fatalf("defaults = %+v", c)
+	}
+}
+
+func TestSecretsAndErrors(t *testing.T) {
+	key, _ := auth.NewKey()
+	c, err := Load(env(map[string]string{
+		"IPVALET_DATABASE_URL_FILE": "/run/db", "IPVALET_ADMIN_KEY_FILE": "/run/key", "IPVALET_METRICS_ADDR": "",
+	}), files(map[string]string{"/run/db": "postgres://from-file\n", "/run/key": key.String() + "\n"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DatabaseURL != "postgres://from-file" || c.AdminKeyID != key.ID || string(c.AdminKeyHash) != string(key.Hash()) || c.MetricsAddr != "" {
+		t.Fatalf("got %+v", c)
+	}
+
+	bad := []map[string]string{
+		{},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_DATABASE_URL_FILE": "/run/db"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_DEFAULT_TTL": "0s"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_DEFAULT_TTL": "3651d"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_DEFAULT_PREFIX_V4": "33"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_LOG_LEVEL": "loud"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_PURGE_INTERVAL": "soon"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_ADMIN_KEY": "nope"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_ADMIN_KEY_HASH": "abc:def"},
+		{"IPVALET_DATABASE_URL": "x", "IPVALET_ADMIN_KEY": key.String(), "IPVALET_ADMIN_KEY_HASH": auth.HashLine(key)},
+	}
+	for _, m := range bad {
+		_, err := Load(env(m), files(map[string]string{"/run/db": "x"}))
+		if err == nil {
+			t.Errorf("%v accepted", m)
+			continue
+		}
+		// The message names the variable.
+		named := false
+		for k := range m {
+			if strings.Contains(err.Error(), strings.TrimSuffix(k, "_FILE")) {
+				named = true
+			}
+		}
+		if len(m) > 0 && !named {
+			t.Errorf("%v: error %q does not name the variable", m, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{"IPVALET_DATABASE_URL_FILE": "/missing"}), files(nil)); err == nil ||
+		!strings.Contains(err.Error(), "IPVALET_DATABASE_URL_FILE") {
+		t.Errorf("missing file: %v", err)
+	}
+}
+
+func TestParseDuration(t *testing.T) {
+	for in, want := range map[string]time.Duration{"90s": 90 * time.Second, "15m": 15 * time.Minute, "36h": 36 * time.Hour,
+		"30d": 30 * 24 * time.Hour, "1h30m": 90 * time.Minute} {
+		if got, err := ParseDuration(in); err != nil || got != want {
+			t.Errorf("%s: %v %v", in, got, err)
+		}
+	}
+	for _, bad := range []string{"", "d", "1.5d", "-1d", "x"} {
+		if _, err := ParseDuration(bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}
