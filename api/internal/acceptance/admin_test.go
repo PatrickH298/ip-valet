@@ -355,6 +355,7 @@ func TestAdminCRUD(t *testing.T) {
 		{"/v1/admin/realms", map[string]any{"name": "Bad"}},
 		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{}}},
 		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{"missing"}}},
+		{"/v1/admin/clients", map[string]any{"name": "c", "realms": []string{"r"}, "user_allowlist": []string{"p"}}},
 		{"/v1/admin/targets", map[string]any{"name": "t", "label": "T", "ipv4": false, "ipv6": false}},
 		{"/v1/admin/keys", map[string]any{"kind": "worker", "name": "w"}},
 		{"/v1/admin/keys", map[string]any{"kind": "admin", "name": "a", "client_id": s.ClientID}},
@@ -388,8 +389,8 @@ func TestAdminCRUD(t *testing.T) {
 
 	// Client update and delete: keys go, entries stay with no client.
 	id := firstEntryID(submitOK(h, s.ClientKey, sub("p", "8.8.8.8", "1d", "g")))
-	upd := h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"user_allowlist": []string{"p"}, "name": "renamed"})
-	if upd["name"] != "renamed" || len(upd["user_allowlist"].([]any)) != 1 {
+	upd := h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"name": "renamed", "rate_limit_per_minute": 100})
+	if upd["name"] != "renamed" || upd["rate_limit_per_minute"].(float64) != 100 {
 		t.Fatalf("patched = %v", upd)
 	}
 	h.Admin(200, "DELETE", "/v1/admin/clients/"+s.ClientID, nil)

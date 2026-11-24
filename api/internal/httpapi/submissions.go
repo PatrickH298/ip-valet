@@ -167,10 +167,6 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 			switch {
 			case !realmOK:
 				f = &rules.Failure{Code: rules.CodeRealmNotAllowed}
-			case !p.AllowsUser(sub.user):
-				f = &rules.Failure{Code: rules.CodeUserNotAllowed}
-			case !p.AllowsGroup(g):
-				f = &rules.Failure{Code: rules.CodeGroupNotAllowed}
 			case sub.prefixErr != nil:
 				f = &rules.Failure{Code: rules.CodeInvalidPrefix}
 			case !state.Routed(targets, sub.realm, sub.user, g, sub.prefix):

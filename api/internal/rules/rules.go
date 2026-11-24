@@ -20,8 +20,6 @@ var Lists = []string{ListIP, ListPrefix, ListTTL, ListCap}
 // Submission result codes, in check order.
 const (
 	CodeRealmNotAllowed = "realm_not_allowed"
-	CodeUserNotAllowed  = "user_not_allowed"
-	CodeGroupNotAllowed = "group_not_allowed"
 	CodeInvalidPrefix   = "invalid_prefix"
 	CodeNoSubscriber    = "no_subscriber"
 	CodeIPDenied        = "ip_denied"

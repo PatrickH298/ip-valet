@@ -23,11 +23,9 @@ type Principal struct {
 	KeyID string
 
 	// Client keys.
-	ClientID   string
-	Realms     []string
-	UserAllow  []string // nil = any user
-	GroupAllow []string // nil = any group
-	RateLimit  *int     // nil = IPVALET_DEFAULT_RATE_LIMIT
+	ClientID  string
+	Realms    []string
+	RateLimit *int // nil = IPVALET_DEFAULT_RATE_LIMIT
 
 	// Worker keys.
 	TargetID string
@@ -37,24 +35,6 @@ type Principal struct {
 func (p *Principal) HasRealm(realm string) bool {
 	for _, r := range p.Realms {
 		if r == realm {
-			return true
-		}
-	}
-	return false
-}
-
-// AllowsUser applies the client's user allow-list.
-func (p *Principal) AllowsUser(u string) bool { return allowed(p.UserAllow, u) }
-
-// AllowsGroup applies the client's group allow-list.
-func (p *Principal) AllowsGroup(g string) bool { return allowed(p.GroupAllow, g) }
-
-func allowed(list []string, v string) bool {
-	if list == nil {
-		return true
-	}
-	for _, x := range list {
-		if x == v {
 			return true
 		}
 	}
@@ -133,23 +113,22 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 	}
 
 	var (
-		p                   = &Principal{Actor: key.ID, KeyID: key.ID}
-		hash                []byte
-		clientID, targetID  *string
-		active              bool
-		userAllow, grpAllow []string
-		rateLimit           *int32
-		realms              []string
+		p                  = &Principal{Actor: key.ID, KeyID: key.ID}
+		hash               []byte
+		clientID, targetID *string
+		active             bool
+		rateLimit          *int32
+		realms             []string
 	)
 	err = a.pool.QueryRow(ctx, `
 		SELECT k.kind, k.secret_hash, k.client_id::text, k.target_id::text,
 		       (k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())),
-		       c.user_allowlist::text[], c.group_allowlist::text[], c.rate_limit_per_minute,
+		       c.rate_limit_per_minute,
 		       ARRAY(SELECT cr.realm::text FROM client_realms cr
 		             WHERE cr.client_id = k.client_id ORDER BY cr.realm)
 		FROM api_keys k LEFT JOIN clients c ON c.id = k.client_id
 		WHERE k.id = $1`, key.ID).
-		Scan(&p.Kind, &hash, &clientID, &targetID, &active, &userAllow, &grpAllow, &rateLimit, &realms)
+		Scan(&p.Kind, &hash, &clientID, &targetID, &active, &rateLimit, &realms)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errUnauthenticated
 	}
@@ -170,8 +149,6 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 	case KindClient:
 		p.ClientID = *clientID
 		p.Realms = realms
-		p.UserAllow = userAllow
-		p.GroupAllow = grpAllow
 		if rateLimit != nil {
 			n := int(*rateLimit)
 			p.RateLimit = &n

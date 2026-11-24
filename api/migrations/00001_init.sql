@@ -21,8 +21,6 @@ CREATE TABLE realms (
 CREATE TABLE clients (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   name                  text NOT NULL UNIQUE,
-  user_allowlist        ident_name[],   -- NULL = any user
-  group_allowlist       ident_name[],   -- NULL = any group
   rate_limit_per_minute integer CHECK (rate_limit_per_minute >= 0),
                                         -- NULL = IPVALET_DEFAULT_RATE_LIMIT; 0 = off
   created_at            timestamptz NOT NULL DEFAULT now(),
@@ -168,6 +166,20 @@ CREATE TABLE target_rejections (
   PRIMARY KEY (target_id, prefix)
 );
 
+-- A target stops holding an entry when the entry is deleted, or when the
+-- target stops matching it (a subscription is deleted, a family is dropped).
+-- Each row records that moment: the target has removed the entry once its
+-- applied_revision reaches `revision` (or, for an expired entry, once its
+-- applied_generated_at passes the expiry). Removal confirmation reads these
+-- rows, so it does not depend on the target still matching the entry.
+CREATE TABLE entry_removals (
+  entry_id  uuid   NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  target_id uuid   NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+  revision  bigint NOT NULL,
+  PRIMARY KEY (entry_id, target_id)
+);
+CREATE INDEX entry_removals_target ON entry_removals (target_id);
+
 CREATE TABLE audit_log (
   id          bigserial PRIMARY KEY,
   at          timestamptz NOT NULL DEFAULT now(),
@@ -187,6 +199,7 @@ CREATE INDEX audit_log_at ON audit_log (at);
 -- +goose Down
 
 DROP TABLE audit_log;
+DROP TABLE entry_removals;
 DROP TABLE target_rejections;
 DROP TABLE cap_rules;
 DROP TABLE ttl_rules;

@@ -251,16 +251,13 @@ type clientView struct {
 	ID                 string   `json:"id"`
 	Name               string   `json:"name"`
 	Realms             []string `json:"realms"`
-	UserAllowlist      []string `json:"user_allowlist"`
-	GroupAllowlist     []string `json:"group_allowlist"`
 	RateLimitPerMinute *int     `json:"rate_limit_per_minute"`
 	CreatedAt          string   `json:"created_at"`
 	UpdatedAt          string   `json:"updated_at"`
 }
 
 const clientSelect = `SELECT c.id::text, c.name, ARRAY(SELECT cr.realm::text FROM client_realms cr
-		WHERE cr.client_id = c.id ORDER BY cr.realm), c.user_allowlist::text[], c.group_allowlist::text[],
-		c.rate_limit_per_minute, c.created_at, c.updated_at FROM clients c`
+		WHERE cr.client_id = c.id ORDER BY cr.realm), c.rate_limit_per_minute, c.created_at, c.updated_at FROM clients c`
 
 func scanClient(row pgx.Row) (clientView, error) {
 	var (
@@ -268,7 +265,7 @@ func scanClient(row pgx.Row) (clientView, error) {
 		c, u time.Time
 		rl   *int32
 	)
-	err := row.Scan(&v.ID, &v.Name, &v.Realms, &v.UserAllowlist, &v.GroupAllowlist, &rl, &c, &u)
+	err := row.Scan(&v.ID, &v.Name, &v.Realms, &rl, &c, &u)
 	if rl != nil {
 		n := int(*rl)
 		v.RateLimitPerMinute = &n
@@ -342,45 +339,15 @@ func (s *Server) getClient(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 
 // clientFields holds parsed client fields; set* say which were present.
 type clientFields struct {
-	name                  string
-	realms                []string
-	userAllow, groupAllow []string
-	rateLimit             *int
-	setName, setRealms    bool
-	setUser, setGroup     bool
-	setRate               bool
-}
-
-func parseIdentList(fe fieldErrors, m map[string]json.RawMessage, key string) ([]string, bool) {
-	raw, ok := m[key]
-	if !ok {
-		return nil, false
-	}
-	if isNull(raw) {
-		return nil, true
-	}
-	var list []string
-	if err := json.Unmarshal(raw, &list); err != nil {
-		fe.add(key, "must be null or an array of names")
-		return nil, false
-	}
-	out := []string{}
-	seen := map[string]bool{}
-	for _, v := range list {
-		if !rules.ValidIdent(v) {
-			fe.add(key, "each name must be 1 to 256 characters without control characters, and not \"*\"")
-			return nil, false
-		}
-		if !seen[v] {
-			seen[v] = true
-			out = append(out, v)
-		}
-	}
-	return out, true
+	name               string
+	realms             []string
+	rateLimit          *int
+	setName, setRealms bool
+	setRate            bool
 }
 
 func parseClientFields(r *http.Request, create bool) (*clientFields, error) {
-	m, err := decodeObject(r, "name", "realms", "user_allowlist", "group_allowlist", "rate_limit_per_minute")
+	m, err := decodeObject(r, "name", "realms", "rate_limit_per_minute")
 	if err != nil {
 		return nil, err
 	}
@@ -413,8 +380,6 @@ func parseClientFields(r *http.Request, create bool) (*clientFields, error) {
 	} else if create {
 		fe.add("realms", "required")
 	}
-	f.userAllow, f.setUser = parseIdentList(fe, m, "user_allowlist")
-	f.groupAllow, f.setGroup = parseIdentList(fe, m, "group_allowlist")
 	if raw, ok := m["rate_limit_per_minute"]; ok {
 		if !isNull(raw) {
 			var n int
@@ -459,9 +424,8 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	var v *clientView
 	err = db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
 		var id string
-		err := tx.QueryRow(ctx, `INSERT INTO clients (name, user_allowlist, group_allowlist, rate_limit_per_minute)
-			VALUES ($1, $2::text[], $3::text[], $4) RETURNING id::text`,
-			f.name, f.userAllow, f.groupAllow, f.rateLimit).Scan(&id)
+		err := tx.QueryRow(ctx, `INSERT INTO clients (name, rate_limit_per_minute)
+			VALUES ($1, $2) RETURNING id::text`, f.name, f.rateLimit).Scan(&id)
 		if db.IsUniqueViolation(err) {
 			return errConflict
 		}
@@ -504,11 +468,9 @@ func (s *Server) patchClient(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		}
 		_, err = tx.Exec(ctx, `UPDATE clients SET
 			name = CASE WHEN $2 THEN $3 ELSE name END,
-			user_allowlist = CASE WHEN $4 THEN $5::text[]::ident_name[] ELSE user_allowlist END,
-			group_allowlist = CASE WHEN $6 THEN $7::text[]::ident_name[] ELSE group_allowlist END,
-			rate_limit_per_minute = CASE WHEN $8 THEN $9 ELSE rate_limit_per_minute END,
+			rate_limit_per_minute = CASE WHEN $4 THEN $5 ELSE rate_limit_per_minute END,
 			updated_at = now()
-			WHERE id = $1`, id, f.setName, f.name, f.setUser, f.userAllow, f.setGroup, f.groupAllow, f.setRate, f.rateLimit)
+			WHERE id = $1`, id, f.setName, f.name, f.setRate, f.rateLimit)
 		if db.IsUniqueViolation(err) {
 			return errConflict
 		}

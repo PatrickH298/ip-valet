@@ -123,9 +123,9 @@ paths:
         revision. An expired entry is revived the same way.
 
         Each group is checked in this order, and reports only its first
-        failure: client scope (`realm_not_allowed`, `user_not_allowed`,
-        `group_not_allowed`), `invalid_prefix`, `no_subscriber`, `ip_denied`,
-        `prefix_too_broad`, `ttl_exceeded`, `cap_exceeded`. If any group fails,
+        failure: `realm_not_allowed` (the realm is not bound to the client),
+        `invalid_prefix`, `no_subscriber`, `ip_denied`, `prefix_too_broad`,
+        `ttl_exceeded`, `cap_exceeded`. If any group fails,
         nothing is written and the response is 422 listing every group.
 
         The prefix is normalised: an address without `/` gets /32 or /128,
@@ -1711,8 +1711,6 @@ components:
       description: In check order.
       enum:
         - realm_not_allowed
-        - user_not_allowed
-        - group_not_allowed
         - invalid_prefix
         - no_subscriber
         - ip_denied
@@ -2059,21 +2057,16 @@ components:
           description: The revision bumped, or null when nothing needed one.
     Client:
       type: object
-      required: [id, name, realms, user_allowlist, group_allowlist, rate_limit_per_minute, created_at, updated_at]
+      description: |
+        A client may act on any user and group in its realms; what it may
+        register there is limited by the realms' rules.
+      required: [id, name, realms, rate_limit_per_minute, created_at, updated_at]
       properties:
         id: { $ref: "#/components/schemas/UUID" }
         name: { type: string, minLength: 1, maxLength: 128 }
         realms:
           type: array
           items: { $ref: "#/components/schemas/RealmName" }
-        user_allowlist:
-          type: [array, "null"]
-          description: Null means any user.
-          items: { $ref: "#/components/schemas/Ident" }
-        group_allowlist:
-          type: [array, "null"]
-          description: Null means any group.
-          items: { $ref: "#/components/schemas/Ident" }
         rate_limit_per_minute:
           type: [integer, "null"]
           minimum: 0
@@ -2091,12 +2084,6 @@ components:
           minItems: 1
           description: Existing realms.
           items: { $ref: "#/components/schemas/RealmName" }
-        user_allowlist:
-          type: [array, "null"]
-          items: { $ref: "#/components/schemas/Ident" }
-        group_allowlist:
-          type: [array, "null"]
-          items: { $ref: "#/components/schemas/Ident" }
         rate_limit_per_minute: { type: [integer, "null"], minimum: 0 }
     ClientPatch:
       type: object
@@ -2107,12 +2094,6 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/RealmName" }
-        user_allowlist:
-          type: [array, "null"]
-          items: { $ref: "#/components/schemas/Ident" }
-        group_allowlist:
-          type: [array, "null"]
-          items: { $ref: "#/components/schemas/Ident" }
         rate_limit_per_minute: { type: [integer, "null"], minimum: 0 }
     ClientMutation:
       allOf:

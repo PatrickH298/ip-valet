@@ -44,7 +44,7 @@ func TestEveryFailingGroupListed(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	s := h.Basic("authentik")
-	h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"group_allowlist": []string{"a", "b", "c"}})
+	h.AddRule(s.Realm, "ip", map[string]any{"user": "*", "group": "x", "prefix": "8.8.8.0/24", "action": "deny", "position": 1})
 	h.AddRule(s.Realm, "ttl", map[string]any{"user": "*", "group": "b", "max_ttl": "1h", "position": 1})
 	h.AddRule(s.Realm, "cap", map[string]any{"user": "*", "group": "b", "max_prefixes": 0})
 
@@ -56,7 +56,7 @@ func TestEveryFailingGroupListed(t *testing.T) {
 	if res["a"]["ok"] != true {
 		t.Errorf("a: %v", res["a"])
 	}
-	if res["x"]["code"] != "group_not_allowed" {
+	if res["x"]["code"] != "ip_denied" {
 		t.Errorf("x: %v", res["x"])
 	}
 	// b fails both TTL and cap; only the first failing check is reported.
@@ -67,12 +67,7 @@ func TestEveryFailingGroupListed(t *testing.T) {
 		t.Errorf("message = %v", msg)
 	}
 
-	// Client scope: realm, then user allow-list.
-	h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"user_allowlist": []string{"alice"}, "group_allowlist": nil})
-	res = results(t, h.Submit(s.ClientKey, sub("p", "8.8.8.8", "1h", "a")))
-	if res["a"]["code"] != "user_not_allowed" {
-		t.Errorf("user allow-list: %v", res)
-	}
+	// Client scope: a realm the client is not bound to fails first.
 	h.CreateRealm("other")
 	body := sub("alice", "8.8.8.8", "1h", "a")
 	body["realm"] = "other"
