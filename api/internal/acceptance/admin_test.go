@@ -435,3 +435,25 @@ func TestAdminCRUD(t *testing.T) {
 	}
 	h.Admin(200, "GET", "/v1/admin/health", nil)
 }
+
+func TestRemovalOfExpiredEntryAfterSubscriptionDeleted(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	s := h.Basic("r")
+	id := firstEntryID(submitOK(h, s.ClientKey, sub("p", "8.8.8.8", "1d", "g")))
+	h.Apply(s.WorkerKey)
+
+	// The entry expires, then the worker's only subscription is deleted before
+	// the worker has applied a desired state generated after the expiry.
+	h.Exec(`UPDATE entries SET expires_at = now() + interval '300 milliseconds' WHERE id = $1`, id)
+	time.Sleep(400 * time.Millisecond)
+	subs := h.Admin(200, "GET", "/v1/admin/workers/"+s.WorkerID+"/subscriptions", nil)["items"].([]any)
+	h.Admin(200, "DELETE", "/v1/admin/subscriptions/"+subs[0].(map[string]any)["id"].(string), nil)
+	if st, per := entryState(h, id); st != "removing" || per["home-r"] != "removing" {
+		t.Fatalf("expired, worker no longer matches: %s %v", st, per)
+	}
+	h.Apply(s.WorkerKey)
+	if st, per := entryState(h, id); st != "expired" || per["home-r"] != "expired" {
+		t.Fatalf("after the worker confirmed: %s %v", st, per)
+	}
+}

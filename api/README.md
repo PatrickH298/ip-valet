@@ -2,7 +2,10 @@
 
 The ip-valet API server is one Go binary. It owns the Postgres database and
 serves the client, worker and admin HTTP APIs. The contract that workers and
-clients build against is [`spec/openapi.yaml`](../spec/openapi.yaml).
+clients build against is [`spec/openapi.yaml`](../spec/openapi.yaml). The
+[design doc](../docs/design.md) explains the model, and the
+[implementation spec](../docs/api-server-spec.md) describes this server in
+detail.
 
 It listens for plain HTTP and is meant to sit behind a reverse proxy that
 terminates TLS. All configuration comes from environment variables. The server
