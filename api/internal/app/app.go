@@ -56,13 +56,12 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 			"workers reporting many rejections may get 413", "max_body_bytes", cfg.MaxBodyBytes,
 			"needed", httpapi.MaxStatusReportBytes)
 	}
-	if cfg.AdminKeySource == "env" {
-		log.Warn("the environment admin key is set as plain IPVALET_ADMIN_KEY, which shows in process and " +
-			"container listings; prefer IPVALET_ADMIN_KEY_FILE or IPVALET_ADMIN_KEY_HASH")
+	if cfg.AdminKeySource != "" {
+		log.Info("environment admin key loaded", "from", map[string]string{"env": "IPVALET_ADMIN_KEY",
+			"file": "IPVALET_ADMIN_KEY_FILE", "hash": "IPVALET_ADMIN_KEY_HASH"}[cfg.AdminKeySource])
 	}
 	if cfg.AdminListenAddr == "" {
-		log.Warn("IPVALET_ADMIN_LISTEN_ADDR is empty, so the admin API shares the public listener; " +
-			"make sure the reverse proxy does not expose /v1/admin")
+		log.Info("IPVALET_ADMIN_LISTEN_ADDR is empty: the admin API is served on IPVALET_LISTEN_ADDR")
 	}
 	a := &App{Config: cfg, Log: log, Pool: pool, Hub: events.NewHub()}
 	bgCtx, cancel := context.WithCancel(context.Background())

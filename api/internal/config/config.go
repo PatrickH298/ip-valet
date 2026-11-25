@@ -182,17 +182,10 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 	c.DefaultPrefixV6 = l.intRange("IPVALET_DEFAULT_PREFIX_V6", "64", 0, 128)
 	c.AuthFailuresPerMinute = l.intRange("IPVALET_AUTH_FAILURES_PER_MINUTE", "10", 0, 100000)
 	c.MaxStreamsPerKey = l.intRange("IPVALET_MAX_STREAMS_PER_KEY", "4", 1, 10000)
-	for _, f := range strings.Split(l.raw("IPVALET_TRUSTED_PROXIES", ""), ",") {
-		f = strings.TrimSpace(f)
-		if f == "" {
-			continue
-		}
-		p, err := ParseNet(f)
-		if err != nil {
-			l.fail("IPVALET_TRUSTED_PROXIES", "%q is not an IP address or CIDR prefix", f)
-			continue
-		}
-		c.TrustedProxies = append(c.TrustedProxies, p)
+	if tp, err := ParseTrustedProxies(l.raw("IPVALET_TRUSTED_PROXIES", "")); err != nil {
+		l.fail("IPVALET_TRUSTED_PROXIES", "%v", err)
+	} else {
+		c.TrustedProxies = tp
 	}
 	c.RetentionEntries = l.positiveDuration("IPVALET_RETENTION_ENTRIES", "90d")
 	c.RetentionAudit = l.positiveDuration("IPVALET_RETENTION_AUDIT", "365d")
@@ -218,6 +211,34 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 		return Config{}, errors.Join(l.errs...)
 	}
 	return c, nil
+}
+
+// AllNetworks trusts every peer.
+var AllNetworks = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
+
+// ParseTrustedProxies reads a trusted-proxy setting: unset, empty or "*"
+// trusts every peer's X-Forwarded-For (the default); "none" trusts none, so
+// the connection's peer is always the client; otherwise a comma-separated
+// list of IP addresses and CIDR prefixes.
+func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
+	switch s = strings.TrimSpace(s); strings.ToLower(s) {
+	case "", "*":
+		return AllNetworks, nil
+	case "none":
+		return nil, nil
+	}
+	var out []netip.Prefix
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		p, err := ParseNet(f)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an IP address or CIDR prefix (or use * or none)", f)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // ParseNet parses an IP address (as a single-address prefix) or a CIDR prefix.

@@ -304,9 +304,8 @@ func (s *Server) wrap(mux *http.ServeMux) http.Handler {
 		info.ip, untrustedXFF = clientIP(r, s.Config.TrustedProxies)
 		if untrustedXFF {
 			s.warnUntrustedXFF.Do(func() {
-				s.Log.Warn("a request carried X-Forwarded-For from a peer not in IPVALET_TRUSTED_PROXIES; "+
-					"the header is ignored, so every client behind that proxy shares one failed-authentication budget",
-					"peer", info.ip.String())
+				s.Log.Info("ignoring X-Forwarded-For from a peer not in IPVALET_TRUSTED_PROXIES; "+
+					"requests through it count as coming from the peer", "peer", info.ip.String())
 			})
 		}
 		h := w.Header()

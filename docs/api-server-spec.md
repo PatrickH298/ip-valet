@@ -89,8 +89,8 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days (
 | --- | --- | --- |
 | `IPVALET_DATABASE_URL` *(secret)* | required | Postgres connection string |
 | `IPVALET_DB_MAX_CONNS` | `10` | Pool size (one more connection is held for `LISTEN`) |
-| `IPVALET_LISTEN_ADDR` | `:8080` | Public listen address (client and worker APIs), plain HTTP behind a TLS-terminating proxy |
-| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Admin API listen address, for trusted networks only; empty serves admin routes on `IPVALET_LISTEN_ADDR` |
+| `IPVALET_LISTEN_ADDR` | `:8080` | Main listen address (client and worker APIs), plain HTTP |
+| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Admin API listen address; empty serves admin routes on `IPVALET_LISTEN_ADDR` |
 | `IPVALET_METRICS_ADDR` | `:9090` | Address for `/metrics`; empty disables metrics |
 | `IPVALET_ADMIN_KEY` *(secret)* | unset | An admin key accepted in addition to database keys |
 | `IPVALET_ADMIN_KEY_HASH` | unset | Alternative to `IPVALET_ADMIN_KEY`: `<keyid>:<hex sha256 of secret>`, as printed by `hash-key`. Setting both is an error. |
@@ -98,7 +98,7 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days (
 | `IPVALET_DEFAULT_PREFIX_V4` | `32` | Shortest IPv4 prefix length in the seeded prefix rule |
 | `IPVALET_DEFAULT_PREFIX_V6` | `64` | Shortest IPv6 prefix length in the seeded prefix rule |
 | `IPVALET_AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications allowed per client network (IPv4 address or IPv6 /64) per minute before its requests are refused; `0` = off |
-| `IPVALET_TRUSTED_PROXIES` | unset | Comma-separated IPs or CIDR prefixes of reverse proxies whose `X-Forwarded-For` is believed |
+| `IPVALET_TRUSTED_PROXIES` | `*` | Peers whose `X-Forwarded-For` is believed: `*` (every peer), `none`, or comma-separated IPs and CIDR prefixes |
 | `IPVALET_MAX_STREAMS_PER_KEY` | `4` | Open event streams allowed per key, per API instance |
 | `IPVALET_RETENTION_ENTRIES` | `90d` | Purge deleted or expired entries this long after they ended |
 | `IPVALET_RETENTION_AUDIT` | `365d` | Purge audit rows older than this |
@@ -308,7 +308,7 @@ Every 401 spends one attempt from the caller's network budget and is counted in 
 
 **Failed-authentication throttle.** One token bucket per client network, kept in memory, evicted after 10 minutes without a failure, and capped at 100,000 networks (past that, the network that failed longest ago is forgotten; since failures cost no database work, that gives an attacker nothing of value): `rate.Limit(n/60)` with burst `n`, where `n` is `IPVALET_AUTH_FAILURES_PER_MINUTE`. A network is an IPv4 address or an IPv6 /64. Only failed authentications spend tokens; while the bucket holds less than one token, every request from that network is refused before any key lookup. Log a warning when a network's budget runs out. There are no rate limits on authenticated requests.
 
-**Client address.** The caller is the connection's peer, unless the peer is in `IPVALET_TRUSTED_PROXIES`; then read `X-Forwarded-For` from the right, skip trusted proxies, and take the first other address (IPv4-mapped addresses are unmapped). A malformed hop stops the walk at the last address vouched for. If a request carries `X-Forwarded-For` from an untrusted peer, log one warning, since every client behind that proxy would then share one budget. The address appears in access logs as `client_ip`.
+**Client address.** The caller is the connection's peer, unless the peer is in `IPVALET_TRUSTED_PROXIES`; then read `X-Forwarded-For` from the right, skip trusted proxies, and take the first other address (IPv4-mapped addresses are unmapped). With every peer trusted (the default), that is the leftmost address in the header. A malformed hop stops the walk at the last address vouched for. If a request carries `X-Forwarded-For` from an untrusted peer, log it once at info level. The address appears in access logs as `client_ip`.
 
 **Acting for a person.** On a request authenticated with an admin key, an `IPValet-On-Behalf-Of` header names the person the key acts for, such as the user signed in to the admin dashboard. It must appear once, as 1 to 256 characters of UTF-8 with no control characters (otherwise 400 `invalid_request`). Audit rows the request writes record it as `on_behalf_of`, and the access log as `on_behalf_of`. Requests with client and worker keys ignore it.
 
@@ -794,11 +794,11 @@ Codes may be added in later versions; a code's meaning never changes. The full c
 
 Expiry itself needs no job: desired state and applied state both compare `expires_at` with the database clock when read.
 
-**Listeners.** The public listener (`IPVALET_LISTEN_ADDR`) serves the client and worker APIs and health, and answers `/v1/admin/*` with 404. The admin listener (`IPVALET_ADMIN_LISTEN_ADDR`, default `:8081`) serves the admin API and health, and should be reachable only from trusted networks. With `IPVALET_ADMIN_LISTEN_ADDR` empty, one listener serves everything and the server logs a warning at startup. Metrics stay on their own listener.
+**Listeners.** The main listener (`IPVALET_LISTEN_ADDR`) serves the client and worker APIs and health, and answers `/v1/admin/*` with 404. The admin listener (`IPVALET_ADMIN_LISTEN_ADDR`, default `:8081`) serves the admin API and health. With `IPVALET_ADMIN_LISTEN_ADDR` empty, one listener serves everything. Metrics stay on their own listener.
 
 **HTTP server.** `ReadHeaderTimeout` 10 s, `ReadTimeout` 30 s, `WriteTimeout` 30 s (lifted per request for SSE routes), `IdleTimeout` 120 s. Reject bodies whose `Content-Length` exceeds the limit up front, and cap the rest with `http.MaxBytesReader`.
 
-**Health.** On the public and admin listeners, without authentication:
+**Health.** On the main and admin listeners, without authentication:
 
 - `GET /healthz` returns 200 `ok` whenever the process is serving.
 - `GET /readyz` returns 200 when `SELECT 1` succeeds within 2 s and the `LISTEN` connection is up, otherwise 503. The database check's result is reused for one second and concurrent probes wait for the check in flight, so probes cost at most one query per second.
@@ -841,12 +841,13 @@ Each item is at least one automated test against a real Postgres. Unit tests for
 - [x] `IPVALET_ADMIN_KEY`, `_FILE` and `_HASH` each authenticate; setting two of them fails startup.
 - [x] Revoking a key takes effect on the very next request.
 - [x] After `IPVALET_AUTH_FAILURES_PER_MINUTE` failures, a network's requests (valid keys included) get 429 `too_many_attempts` with `Retry-After`; other networks, successful requests and wrong-kind 403s are unaffected; IPv6 is counted per /64; failures appear in metrics by reason.
-- [x] `X-Forwarded-For` is believed only from a trusted proxy, and prepending addresses does not escape the throttle.
+- [x] With `IPVALET_TRUSTED_PROXIES` set, `X-Forwarded-For` is believed only from those proxies, and prepending addresses does not escape the throttle; with `none` it is ignored; by default it is believed from every peer.
 - [x] A key cannot open more than `IPVALET_MAX_STREAMS_PER_KEY` event streams; revoking a key ends its streams within a heartbeat.
 - [x] Responses carrying a new key are `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 - [x] Unknown keys and wrong secrets are refused without the database (401 even with the database gone); a key created on one instance is accepted by another within moments.
 - [x] The throttle forgets the network that failed longest ago once it tracks its maximum.
-- [x] The public listener answers admin routes with 404 and the admin listener serves them; each serves health.
+- [x] The main listener answers admin routes with 404 and the admin listener serves them; each serves health.
+- [x] A database that does not exist is created at startup, then migrated.
 - [x] Audit rows record the caller's address.
 - [x] Audit rows record the `IPValet-On-Behalf-Of` of an admin request, filterable as `on_behalf_of`; a malformed one is 400 and changes nothing; client keys are not asked for it.
 - [x] Creating an admin key without an expiry returns an `admin_key_without_expiry` warning; `/v1/admin/health` lists keys expiring soon and keys unused for 30 days.
@@ -925,13 +926,14 @@ The design doc did not settle these; this spec picked a value so the server coul
 | TTL on existing entries | Compared by lifetime left, not the TTL originally requested | An entry near the end of its TTL is not shortened for no reason |
 | Rate limits | None for now | To be revisited; floods of bad keys are handled by the failed-authentication throttle |
 | Failed-authentication throttle | 10 failures a minute per IPv4 address or IPv6 /64, in memory per instance; refused requests are not checked | Keeps floods off the database; per-key lockouts would let anyone who knows a key id lock out its owner |
-| Client address | `X-Forwarded-For` only from `IPVALET_TRUSTED_PROXIES` | A client must not be able to choose its own address |
+| Client address | `X-Forwarded-For` from every peer unless `IPVALET_TRUSTED_PROXIES` narrows it (or is `none`) | Works behind any proxy, or none, without setup; deployers who need addresses clients cannot choose list their proxies |
 | Key index | Key ids and secret hashes in memory; status always from the database | Bad keys cost no database work, and revocation still applies on the next request |
-| Admin listener | Separate listener on `:8081` | The admin API is never reachable through the public proxy, whatever the proxy or forwarded-address settings |
+| Admin listener | Separate listener on `:8081` | The admin API can be made reachable from fewer places than the client and worker API, whatever the proxy settings |
+| Missing database | Created at startup (`CREATE DATABASE`, through the `postgres` or `template1` database with the same credentials) when the role may create databases | No setup script is needed before the first start |
 | Readiness | Database check reused for one second | Unauthenticated probes cannot tie up database connections |
 | Audit address | Each audit row records the caller's address | The audit log is the record kept for a year |
 | Acting for a person | An admin key may name the person it acts for in `IPValet-On-Behalf-Of`; audit rows record it | A dashboard holds one admin key for everyone who signs in; the audit log still says who made each change |
 | Event streams per key | 4 per instance; keys re-checked every heartbeat | One key cannot multiply the work every change causes, and revocation reaches open streams |
 | Client event stream | Baseline of entries live or ended in the last 24 h; recheck every 30 s | Catches expiries without a notification |
-| Metrics | Separate listener on `:9090` | Not reachable through the public proxy |
+| Metrics | Separate listener on `:9090` | Exposed independently of both APIs |
 | Status reports | Not audited; logged at debug level | They arrive constantly and change no configuration |

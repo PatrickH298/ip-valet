@@ -41,7 +41,8 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// Connect opens the pool, retrying with backoff for up to retryFor.
+// Connect opens the pool, retrying with backoff for up to retryFor. When the
+// server says the database does not exist, Connect creates it.
 func Connect(ctx context.Context, url string, maxConns int32, retryFor time.Duration, log *slog.Logger) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
@@ -54,12 +55,21 @@ func Connect(ctx context.Context, url string, maxConns int32, retryFor time.Dura
 	}
 	deadline := time.Now().Add(retryFor)
 	backoff := 250 * time.Millisecond
+	created := false
 	for {
 		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err = pool.Ping(pctx)
 		cancel()
 		if err == nil {
 			return pool, nil
+		}
+		if missingDatabase(err) && !created {
+			if err := createDatabase(ctx, cfg.ConnConfig, log); err != nil {
+				pool.Close()
+				return nil, err
+			}
+			created = true
+			continue
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
 			pool.Close()
@@ -74,6 +84,54 @@ func Connect(ctx context.Context, url string, maxConns int32, retryFor time.Dura
 		}
 		backoff = min(backoff*2, 5*time.Second)
 	}
+}
+
+// missingDatabase reports whether err is the server saying the database
+// does not exist (SQLSTATE 3D000).
+func missingDatabase(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.Code == "3D000"
+}
+
+// createDatabase creates the database named in cc, connecting with the same
+// credentials to a maintenance database ("postgres", or "template1"). The
+// role needs to be a superuser or have CREATEDB. Another instance creating
+// it at the same moment is fine.
+func createDatabase(ctx context.Context, cc *pgx.ConnConfig, log *slog.Logger) error {
+	name := cc.Database
+	if name == "" {
+		name = cc.User
+	}
+	var conn *pgx.Conn
+	var err error
+	for _, maint := range []string{"postgres", "template1"} {
+		mc := cc.Copy()
+		mc.Database = maint
+		cctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		conn, err = pgx.ConnectConfig(cctx, mc)
+		cancel()
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("database %q does not exist, and connecting to the postgres or template1 database "+
+			"to create it failed: %w", name, redact(err))
+	}
+	defer conn.Close(context.WithoutCancel(ctx))
+	_, err = conn.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	var pe *pgconn.PgError
+	switch {
+	case err == nil:
+		log.Info("created the database", "database", name)
+		return nil
+	case errors.As(err, &pe) && pe.Code == "42P04": // duplicate_database: another instance won
+		return nil
+	case errors.As(err, &pe) && pe.Code == "42501": // insufficient_privilege
+		return fmt.Errorf("database %q does not exist and role %q may not create it: create the database, "+
+			"or give the role CREATEDB", name, cc.User)
+	}
+	return fmt.Errorf("creating database %q: %w", name, err)
 }
 
 // redact drops connection details that pgconn may include in errors.
