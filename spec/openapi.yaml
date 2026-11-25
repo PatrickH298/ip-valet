@@ -1,0 +1,2466 @@
+openapi: 3.1.0
+info:
+  title: ip-valet API
+  version: 1.0.0
+  summary: Keeps firewall allow-lists in sync with addresses that people register.
+  description: |
+    The contract between the ip-valet API server and the workers and clients
+    that talk to it. All paths are under `/v1`; the protocol version is
+    separate from component release versions.
+
+    **Keys.** Every `/v1` request carries `Authorization: Bearer <key>`, where
+    a key is `ipv_<keyid>_<secret>` (`^ipv_[a-z2-7]{16}_[a-z2-7]{52}$`). Each
+    key has one kind: admin routes need an admin key, `/v1/worker/*` needs a
+    worker key, and every other `/v1` route needs a client key. A missing,
+    malformed, unknown, revoked or expired key is `401 unauthenticated`; a key
+    of the wrong kind is `403 forbidden`.
+
+    **Failed authentication.** A network (an IPv4 address, or an IPv6 /64)
+    that fails authentication too often, by default 10 times a minute, has
+    its requests refused unchecked with 429 `too_many_attempts` and
+    `Retry-After` until its budget refills. Successful requests never count.
+    Behind a reverse proxy the server reads the caller's address from
+    `X-Forwarded-For` only when the proxy is configured as trusted.
+
+    **Workers.** An admin registers each worker with a name, a label (the
+    only worker field clients see), the address families it applies and its
+    subscriptions: (realm, user, group) selectors, each a name or `*`. An
+    entry is routed to every worker that applies its family and has a
+    subscription matching it. A worker key is bound to one worker; the
+    worker reads only its own desired state (prefixes and expiries, never who
+    registered them) and reports back which revision it has applied. Where a
+    worker applies its list, such as a firewall, is up to the worker; the API
+    has no notion of it.
+
+    **Conventions.** JSON in and out, UTF-8, `snake_case` fields. A wildcard
+    selector field is the string `"*"`. Timestamps are RFC 3339 in UTC.
+    Durations use the TTL syntax: a positive integer with unit `s`, `m`, `h`
+    or `d` (at most `3650d`), or `unlimited`. Unknown body fields and unknown
+    query parameters are `400 invalid_request`. Every response carries
+    `X-Request-Id` and `X-Content-Type-Options: nosniff`; responses under
+    `/v1` carry `Cache-Control: no-store` (event streams: `no-cache`).
+
+    **Lists** take `limit` (default 100, max 1000) and an opaque `cursor`, and
+    return `{ "items": [...], "next_cursor": "..." | null }`.
+
+    **Codes.** Clients act on `error.code`, never on `message`. Codes may be
+    added in later versions; a code's meaning never changes.
+
+    **The impact check.** Rule changes of any kind, subscription deletion,
+    worker deletion and worker family changes work out what they do to
+    existing live, unexpired entries. No entry is ever left failing a rule:
+
+    - IP or prefix rule now rejects it: the entry is removed.
+    - Over a cap: for each user and cap rule, the most recently submitted
+      prefixes are kept up to the limit, and the entries holding the others
+      are removed.
+    - Over a TTL rule (lifetime left longer than the max, or unlimited under a
+      finite max): the entry is shortened to now plus the max.
+    - No worker matches it any more (routing changes): it fails no rule, so it
+      stays, reading `unrouted`.
+
+    With `dry_run=true` the change is applied and rolled back and the response
+    lists the impact. A change with impact and without `confirm=true` is 409
+    `confirmation_required`, listing the impact. With `confirm=true` the
+    change and every action are saved in one transaction with at most one
+    revision bump.
+
+    **Removal.** When an entry is deleted, or a worker stops matching it, the
+    server records which workers held it. The entry reads `removing` until
+    each of them confirms by applying a later revision (or, for an expired
+    entry, a desired state generated after the expiry), even if the worker no
+    longer matches it.
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+servers:
+  - url: https://ip-valet.example.com
+    description: Behind a TLS-terminating reverse proxy.
+tags:
+  - name: client
+    description: Submit and manage entries; read their applied state. Client keys.
+  - name: worker
+    description: Fetch a worker's desired state, receive change signals, report status. Worker keys.
+  - name: admin
+    description: Configuration, entries, health and audit. Admin keys.
+  - name: health
+    description: Liveness and readiness. No authentication.
+
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      operationId: healthz
+      summary: Liveness
+      description: 200 whenever the process is serving.
+      security: []
+      responses:
+        "200":
+          description: The process is serving.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            text/plain:
+              schema: { type: string, examples: ["ok\n"] }
+
+  /readyz:
+    get:
+      tags: [health]
+      operationId: readyz
+      summary: Readiness
+      description: 200 when `SELECT 1` succeeds within 2 s and the LISTEN connection is up; otherwise 503.
+      security: []
+      responses:
+        "200":
+          description: Ready.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            text/plain:
+              schema: { type: string }
+        "503":
+          description: The database is unreachable or the LISTEN connection is down.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            text/plain:
+              schema: { type: string }
+
+  # ---------------------------------------------------------------- client
+
+  /v1/submissions:
+    post:
+      tags: [client]
+      operationId: createSubmission
+      summary: Create or replace entries
+      description: |
+        Registers one prefix for one user in one or more groups: one entry per
+        group, all or nothing. A re-submission of an existing (realm, user,
+        group, prefix) replaces it in place: it keeps its id, its expiry becomes
+        now plus the new TTL, and it takes the new submission id and a new
+        revision. An expired entry is revived the same way.
+
+        Each group is checked in this order, and reports only its first
+        failure: `realm_not_allowed` (the realm is not bound to the client),
+        `invalid_prefix`, `no_subscriber`, `ip_denied`, `prefix_too_broad`,
+        `ttl_exceeded`, `cap_exceeded`. If any group fails,
+        nothing is written and the response is 422 listing every group.
+
+        The prefix is normalised: an address without `/` gets /32 or /128,
+        IPv4-mapped IPv6 becomes IPv4, and host bits are cleared. The response
+        returns the canonical form.
+      security: [{ clientKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubmissionRequest" }
+      responses:
+        "201":
+          description: Every entry was created or replaced.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmissionResponse" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "422":
+          description: At least one group failed a check; nothing was written.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmissionRejected" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/submissions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    delete:
+      tags: [client]
+      operationId: deleteSubmission
+      summary: Delete every entry of a submission
+      description: |
+        Soft-deletes every live entry that still holds this submission id. 404
+        when there is none, or when any of them lies outside the client's realms.
+      security: [{ clientKey: [] }]
+      responses:
+        "200":
+          description: The deleted entry ids.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deleted]
+                properties:
+                  deleted:
+                    type: array
+                    items: { $ref: "#/components/schemas/UUID" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/entries:
+    get:
+      tags: [client]
+      operationId: listEntries
+      summary: List entries in the client's realms
+      description: |
+        Ordered by creation time. Only live, unexpired entries unless
+        `include_ended=true`. The `state` filter runs after state is computed,
+        so a page may hold fewer than `limit` items while `next_cursor` is set.
+      security: [{ clientKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RealmFilter"
+        - $ref: "#/components/parameters/UserFilter"
+        - $ref: "#/components/parameters/GroupFilter"
+        - $ref: "#/components/parameters/PrefixFilter"
+        - $ref: "#/components/parameters/StateFilter"
+        - $ref: "#/components/parameters/IncludeEnded"
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of entries.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Entry" }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/entries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [client]
+      operationId: getEntry
+      summary: One entry with its applied state
+      security: [{ clientKey: [] }]
+      responses:
+        "200":
+          description: The entry.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [client]
+      operationId: deleteEntry
+      summary: Delete one entry
+      description: Soft-deletes the entry. An entry that is already deleted, or outside the client's realms, is 404.
+      security: [{ clientKey: [] }]
+      responses:
+        "200":
+          description: The entry, usually in state `removing`.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Entry" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/events:
+    get:
+      tags: [client]
+      operationId: clientEvents
+      summary: Entry state changes (Server-Sent Events)
+      description: |
+        On connect the server computes the state of every entry in the
+        client's realms that is live or ended within the last 24 hours, and
+        sends nothing for that baseline. It recomputes on every change
+        notification, every status report and on a timer (default 30 s, which
+        catches expiries), and sends one `entry` event per entry whose overall
+        state changed:
+
+        ```
+        event: entry
+        data: {"id":"…","state":"active"}
+
+        ```
+
+        A `: ping` comment is sent every 20 s by default. The stream ends when
+        the server shuts down, or within one heartbeat of the key being
+        revoked or expiring; reconnect and re-read entries as needed. Each key
+        may hold a limited number of open streams (4 by default) per API
+        instance; beyond that the request is 429 `too_many_streams`.
+      security: [{ clientKey: [] }]
+      responses:
+        "200":
+          description: An event stream.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+            Cache-Control: { $ref: "#/components/headers/NoCache" }
+            X-Accel-Buffering: { $ref: "#/components/headers/NoBuffering" }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "`entry` events whose data is an EntryEvent object."
+              x-event-data: { $ref: "#/components/schemas/EntryEvent" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- worker
+
+  /v1/worker/desired-state:
+    get:
+      tags: [worker]
+      operationId: getDesiredState
+      summary: The worker's desired state
+      description: |
+        One item per distinct prefix among the worker's matching, unexpired,
+        undeleted entries, limited to its families, ordered by prefix. When
+        several entries share a prefix the item carries the latest expiry, or
+        `null` if any is unlimited. `revision`, `generated_at` and the items
+        come from one database snapshot.
+
+        The `ETag` is a quoted hex SHA-256 over the families and the items
+        only, so it changes only when this worker's content changes. With a
+        matching `If-None-Match` the response is 304 with no body; the
+        `IPValet-Revision` and `IPValet-Generated-At` headers are present on
+        both, and the worker reports status with those values.
+      security: [{ workerKey: [] }]
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+          description: An ETag from an earlier response.
+      responses:
+        "200":
+          description: The desired state.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+            ETag: { $ref: "#/components/headers/ETag" }
+            IPValet-Revision: { $ref: "#/components/headers/IPValetRevision" }
+            IPValet-Generated-At: { $ref: "#/components/headers/IPValetGeneratedAt" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DesiredState" }
+        "304":
+          description: Unchanged for this worker since the given ETag.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+            ETag: { $ref: "#/components/headers/ETag" }
+            IPValet-Revision: { $ref: "#/components/headers/IPValetRevision" }
+            IPValet-Generated-At: { $ref: "#/components/headers/IPValetGeneratedAt" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/worker/events:
+    get:
+      tags: [worker]
+      operationId: workerEvents
+      summary: Change signals (Server-Sent Events)
+      description: |
+        Sends one `changed` event immediately on connect, whatever
+        `Last-Event-ID` says, and another whenever the global revision may
+        have changed. Events can arrive more often than this worker's state
+        changes; fetch desired state with `If-None-Match` to absorb that.
+
+        ```
+        id: 1842
+        event: changed
+        data: {"revision":1842}
+
+        ```
+
+        A `: ping` comment is sent every 20 s by default. The stream ends when
+        the server shuts down, or within one heartbeat of the key being
+        revoked or expiring; reconnect with backoff. Each key may hold a
+        limited number of open streams (4 by default) per API instance;
+        beyond that the request is 429 `too_many_streams`.
+      security: [{ workerKey: [] }]
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          schema: { type: string }
+          description: Accepted and ignored; the server always sends one event on connect.
+      responses:
+        "200":
+          description: An event stream.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+            Cache-Control: { $ref: "#/components/headers/NoCache" }
+            X-Accel-Buffering: { $ref: "#/components/headers/NoBuffering" }
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: "`changed` events whose id is the revision and whose data is a ChangedEvent object."
+              x-event-data: { $ref: "#/components/schemas/ChangedEvent" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/worker/status:
+    post:
+      tags: [worker]
+      operationId: reportStatus
+      summary: Report the applied revision, rejections or an error
+      description: |
+        Report success only when everything except the listed rejections is
+        applied (for example, in place on the firewall the worker manages);
+        otherwise report an error.
+
+        Every report sets `last_seen_at`, `last_instance` and
+        `last_version`. A success report whose revision is at least the
+        stored `applied_revision` raises it, raises `applied_generated_at` to
+        the reported `generated_at` (never lowering it) and replaces the
+        worker's rejections. A success report with an older revision is stale
+        and changes nothing else. An error report records `last_error` and
+        leaves the applied state alone. A report may be repeated as a heartbeat.
+      security: [{ workerKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StatusReport" }
+      responses:
+        "200":
+          description: The applied revision now stored.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [applied_revision]
+                properties:
+                  applied_revision: { type: integer, format: int64, minimum: 0 }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: realms
+
+  /v1/admin/realms:
+    get:
+      tags: [admin]
+      operationId: listRealms
+      summary: List realms
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of realms, by name.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Realm" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createRealm
+      summary: Create a realm and seed its default rules
+      description: |
+        Seeds, with user and group `*` and the description `seeded default`:
+        IP rules 1–25 deny each reserved range (IPv4, then IPv6), 26–27 accept
+        `0.0.0.0/0` and `::/0`; one prefix rule with the configured default
+        lengths; one TTL rule with the configured default TTL; no cap rules.
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [name]
+              properties:
+                name: { $ref: "#/components/schemas/RealmName" }
+      responses:
+        "201":
+          description: The realm.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Realm"
+                  - $ref: "#/components/schemas/MutationExtras"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/realms/{name}:
+    parameters:
+      - name: name
+        in: path
+        required: true
+        schema: { $ref: "#/components/schemas/RealmName" }
+    get:
+      tags: [admin]
+      operationId: getRealm
+      summary: One realm
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The realm.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Realm" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      operationId: deleteRealm
+      summary: Delete a realm
+      description: |
+        Soft-deletes the realm's live entries (one revision bump; they read
+        `removing` until every worker that held them confirms, including
+        workers whose subscriptions go with the realm) and deletes its rules,
+        client bindings and subscriptions, bumping `subscriptions_revision` on
+        the affected workers. Needs no confirmation. A client left with no realm gets 403
+        `realm_not_allowed` on every call.
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: What was removed.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/RealmDeleteResult"
+                  - $ref: "#/components/schemas/MutationExtras"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: rules
+
+  /v1/admin/realms/{realm}/rules/{list}:
+    parameters:
+      - $ref: "#/components/parameters/RealmPath"
+      - $ref: "#/components/parameters/ListPath"
+    get:
+      tags: [admin]
+      operationId: listRules
+      summary: A realm's rule list, in order
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of rules, by position.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Rule" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createRule
+      summary: Add a rule
+      description: |
+        Without `position` the rule goes immediately before the list's first
+        catch-all (user and group `*`, and for IP rules a `/0` prefix), or at
+        the end. Goes through the impact check.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RuleCreate" }
+      responses:
+        "200":
+          description: Dry run (`dry_run=true`); nothing was saved.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleMutation" }
+        "201":
+          description: The rule.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/realms/{realm}/rules/{list}/order:
+    parameters:
+      - $ref: "#/components/parameters/RealmPath"
+      - $ref: "#/components/parameters/ListPath"
+    put:
+      tags: [admin]
+      operationId: reorderRules
+      summary: Reorder a rule list
+      description: "`ids` must list every rule in the list exactly once. Goes through the impact check."
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [ids]
+              properties:
+                ids:
+                  type: array
+                  items: { $ref: "#/components/schemas/UUID" }
+      responses:
+        "200":
+          description: The list in its new order.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - type: object
+                    required: [items]
+                    properties:
+                      items: { type: array, items: { $ref: "#/components/schemas/Rule" } }
+                  - $ref: "#/components/schemas/MutationExtras"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/realms/{realm}/rules/{list}/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RealmPath"
+      - $ref: "#/components/parameters/ListPath"
+      - $ref: "#/components/parameters/IdPath"
+    patch:
+      tags: [admin]
+      operationId: updateRule
+      summary: Change a rule
+      description: Fields present replace the stored ones; `position` moves the rule. Goes through the impact check.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RulePatch" }
+      responses:
+        "200":
+          description: The rule.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      operationId: deleteRule
+      summary: Delete a rule
+      description: Later rules move up one position. Goes through the impact check.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          description: The deleted rule.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RuleMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: clients
+
+  /v1/admin/clients:
+    get:
+      tags: [admin]
+      operationId: listClients
+      summary: List clients
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of clients, by name.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Client" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createClient
+      summary: Create a client
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientCreate" }
+      responses:
+        "201":
+          description: The client.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/clients/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [admin]
+      operationId: getClient
+      summary: One client
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The client.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Client" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    patch:
+      tags: [admin]
+      operationId: updateClient
+      summary: Change a client
+      description: Fields present replace the stored ones. `realms` replaces the client's realm bindings.
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ClientPatch" }
+      responses:
+        "200":
+          description: The client.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      operationId: deleteClient
+      summary: Delete a client
+      description: Deletes the client's keys; its entries remain with `client_id` null.
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The deleted client.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ClientMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: workers
+
+  /v1/admin/workers:
+    get:
+      tags: [admin]
+      operationId: listWorkers
+      summary: List workers
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of workers, by name.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Worker" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createWorker
+      summary: Create a worker
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkerCreate" }
+      responses:
+        "201":
+          description: The worker.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/workers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [admin]
+      operationId: getWorker
+      summary: One worker
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The worker.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Worker" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    patch:
+      tags: [admin]
+      operationId: updateWorker
+      summary: Change a worker
+      description: |
+        A change to `ipv4` or `ipv6` bumps the revision and the worker's
+        `subscriptions_revision`, and goes through the impact check. Name and
+        label changes do neither.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WorkerPatch" }
+      responses:
+        "200":
+          description: The worker.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409":
+          description: |
+            `confirmation_required` when the impact check found affected
+            entries, or `conflict` when the name is taken.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      operationId: deleteWorker
+      summary: Delete a worker
+      description: Deletes its subscriptions, rejections and worker keys. Goes through the impact check.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          description: The deleted worker.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkerMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/workers/{id}/subscriptions:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [admin]
+      operationId: listSubscriptions
+      summary: A worker's subscriptions
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of subscriptions, by creation time.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Subscription" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createSubscription
+      summary: Subscribe a worker
+      description: |
+        Bumps the revision and the worker's `subscriptions_revision`, so the
+        group's existing entries read `pending` on this worker until it
+        catches up. Subscriptions are never edited: delete and create.
+        A realm `*` with a specific user or group returns a
+        `cross_realm_selector` warning.
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SubscriptionCreate" }
+      responses:
+        "201":
+          description: The subscription.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubscriptionMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/subscriptions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    delete:
+      tags: [admin]
+      operationId: deleteSubscription
+      summary: Delete a subscription
+      description: Bumps the revision and the worker's `subscriptions_revision`. Goes through the impact check.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/DryRun"
+        - $ref: "#/components/parameters/Confirm"
+      responses:
+        "200":
+          description: The deleted subscription.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubscriptionMutation" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/workers/{id}/health:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [admin]
+      operationId: getWorkerHealth
+      summary: One worker's health
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The worker's health.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/WorkerHealth" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/health:
+    get:
+      tags: [admin]
+      operationId: getHealth
+      summary: Every worker's health
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The current revision and every worker's health, by name.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revision, workers]
+                properties:
+                  revision: { type: integer, format: int64 }
+                  workers: { type: array, items: { $ref: "#/components/schemas/WorkerHealth" } }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: keys
+
+  /v1/admin/keys:
+    get:
+      tags: [admin]
+      operationId: listKeys
+      summary: List keys
+      description: Never includes a secret or its hash. The environment admin key is not listed.
+      security: [{ adminKey: [] }]
+      parameters:
+        - name: kind
+          in: query
+          schema: { $ref: "#/components/schemas/KeyKind" }
+        - name: client_id
+          in: query
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: worker_id
+          in: query
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of keys, by creation time.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/Key" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    post:
+      tags: [admin]
+      operationId: createKey
+      summary: Create a key
+      description: The response holds the full key in `key`. It is shown only this once.
+      security: [{ adminKey: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/KeyCreate" }
+      responses:
+        "201":
+          description: The key record and, once, the full key.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Key"
+                  - type: object
+                    required: [key]
+                    properties:
+                      key:
+                        type: string
+                        pattern: "^ipv_[a-z2-7]{16}_[a-z2-7]{52}$"
+                  - $ref: "#/components/schemas/MutationExtras"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/KeyIdPath"
+    get:
+      tags: [admin]
+      operationId: getKey
+      summary: One key record
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The key record.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Key" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/keys/{id}/revoke:
+    parameters:
+      - $ref: "#/components/parameters/KeyIdPath"
+    post:
+      tags: [admin]
+      operationId: revokeKey
+      summary: Revoke a key
+      description: Takes effect on the key's next request. Revoking a revoked key keeps the first `revoked_at`.
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The key record.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Key"
+                  - $ref: "#/components/schemas/MutationExtras"
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  # ---------------------------------------------------------------- admin: entries, audit
+
+  /v1/admin/entries:
+    get:
+      tags: [admin]
+      operationId: listAdminEntries
+      summary: List entries in every realm
+      description: Like the client list, across all realms, with admin fields and two more filters.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RealmFilter"
+        - $ref: "#/components/parameters/UserFilter"
+        - $ref: "#/components/parameters/GroupFilter"
+        - $ref: "#/components/parameters/PrefixFilter"
+        - $ref: "#/components/parameters/StateFilter"
+        - $ref: "#/components/parameters/IncludeEnded"
+        - name: client_id
+          in: query
+          schema: { $ref: "#/components/schemas/UUID" }
+        - name: worker_id
+          in: query
+          description: Entries the worker matches (families and subscriptions).
+          schema: { $ref: "#/components/schemas/UUID" }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of entries.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AdminEntry" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/entries/{id}:
+    parameters:
+      - $ref: "#/components/parameters/IdPath"
+    get:
+      tags: [admin]
+      operationId: getAdminEntry
+      summary: One entry, any realm
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The entry.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminEntry" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+    delete:
+      tags: [admin]
+      operationId: deleteAdminEntry
+      summary: Delete one entry, any realm
+      security: [{ adminKey: [] }]
+      responses:
+        "200":
+          description: The entry, usually in state `removing`.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdminEntry" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+  /v1/admin/audit:
+    get:
+      tags: [admin]
+      operationId: listAudit
+      summary: The audit log, newest first
+      security: [{ adminKey: [] }]
+      parameters:
+        - name: since
+          in: query
+          description: Rows at or after this time.
+          schema: { $ref: "#/components/schemas/Timestamp" }
+        - name: until
+          in: query
+          description: Rows before this time.
+          schema: { $ref: "#/components/schemas/Timestamp" }
+        - name: actor
+          in: query
+          description: A key id, `admin:env` or `system`.
+          schema: { type: string }
+        - name: realm
+          in: query
+          schema: { type: string }
+        - name: action
+          in: query
+          description: For example `entry.create`, `entry.replace`, `entry.delete`, `entry.shorten`, `rule.update`.
+          schema: { type: string }
+        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: A page of audit rows.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, next_cursor]
+                properties:
+                  items: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+                  next_cursor: { $ref: "#/components/schemas/NextCursor" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
+components:
+  securitySchemes:
+    clientKey:
+      type: http
+      scheme: bearer
+      description: A client key, bound to one or more realms.
+    workerKey:
+      type: http
+      scheme: bearer
+      description: A worker key, bound to one worker. A worker may hold several keys, for rotation.
+    adminKey:
+      type: http
+      scheme: bearer
+      description: An admin key, from the database or the environment.
+
+  headers:
+    RequestId:
+      description: Identifies the request in the server's logs.
+      schema: { type: string }
+    RetryAfter:
+      description: Seconds until a request would be accepted.
+      schema: { type: integer, minimum: 1 }
+    WWWAuthenticate:
+      schema: { type: string, const: Bearer }
+    ETag:
+      description: Quoted hex SHA-256 of the families and items.
+      schema: { type: string, pattern: '^"[0-9a-f]{64}"$' }
+    IPValetRevision:
+      description: The global revision the desired state was read at.
+      schema: { type: integer, format: int64 }
+    IPValetGeneratedAt:
+      description: The database time of the snapshot, RFC 3339 UTC with microseconds.
+      schema: { type: string, format: date-time }
+    NoCache:
+      schema: { type: string, const: no-cache }
+    NoBuffering:
+      schema: { type: string, const: "no" }
+
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/UUID" }
+    KeyIdPath:
+      name: id
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/KeyId" }
+    RealmPath:
+      name: realm
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/RealmName" }
+    ListPath:
+      name: list
+      in: path
+      required: true
+      schema: { $ref: "#/components/schemas/RuleList" }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    Cursor:
+      name: cursor
+      in: query
+      description: The `next_cursor` of the previous page.
+      schema: { type: string }
+    RealmFilter:
+      name: realm
+      in: query
+      description: For clients, a realm outside the client's realms is 403 `realm_not_allowed`.
+      schema: { $ref: "#/components/schemas/RealmName" }
+    UserFilter:
+      name: user
+      in: query
+      schema: { $ref: "#/components/schemas/Ident" }
+    GroupFilter:
+      name: group
+      in: query
+      schema: { $ref: "#/components/schemas/Ident" }
+    PrefixFilter:
+      name: prefix
+      in: query
+      description: Normalised, then matched exactly.
+      schema: { type: string }
+    StateFilter:
+      name: state
+      in: query
+      schema: { $ref: "#/components/schemas/EntryState" }
+    IncludeEnded:
+      name: include_ended
+      in: query
+      description: Also return deleted and expired entries.
+      schema: { type: boolean, default: false }
+    DryRun:
+      name: dry_run
+      in: query
+      description: Apply the change, report its impact (with the action each entry would get) and warnings, then roll back.
+      schema: { type: boolean, default: false }
+    Confirm:
+      name: confirm
+      in: query
+      description: |
+        Save the change together with its action on every affected entry
+        (see the impact check). Without it, a change that affects entries is
+        409 `confirmation_required`.
+      schema: { type: boolean, default: false }
+
+  responses:
+    InvalidRequest:
+      description: "`invalid_request`: malformed JSON, unknown fields, or invalid names, TTLs or query parameters."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: "`unauthenticated`: missing, malformed, unknown, revoked or expired key."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+        WWW-Authenticate: { $ref: "#/components/headers/WWWAuthenticate" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: |
+        `forbidden`: the key's kind cannot use this route; or
+        `realm_not_allowed`: a client with no realms, or a realm-scoped read
+        outside the client's realms.
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: "`not_found`: unknown id, or outside the caller's realms."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: "`conflict`: a resource with that name already exists."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    ConfirmationRequired:
+      description: "`confirmation_required`: the change affects existing entries (`impact`); repeat with `confirm=true`."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BodyTooLarge:
+      description: "`body_too_large`: the body exceeds IPVALET_MAX_BODY_BYTES (64 KiB by default)."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    TooManyRequests:
+      description: |
+        `too_many_attempts`: the caller's network has failed authentication
+        too often (by default 10 times a minute; IPv6 is counted per /64), so
+        its requests are refused unchecked until `Retry-After` passes. Or, on
+        an event stream, `too_many_streams`: the key already holds the
+        maximum number of open streams.
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+        Retry-After: { $ref: "#/components/headers/RetryAfter" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Internal:
+      description: "`internal`: anything unexpected. The request id identifies it in the server's logs."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unavailable:
+      description: "`unavailable`: the database is unreachable, or the server is shutting down."
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/RequestId" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    # ---------- scalars
+
+    UUID:
+      type: string
+      format: uuid
+    Timestamp:
+      type: string
+      format: date-time
+      description: RFC 3339 in UTC.
+    NullableTimestamp:
+      type: [string, "null"]
+      format: date-time
+    NextCursor:
+      type: [string, "null"]
+      description: Pass as `cursor` for the next page; null on the last page.
+    RealmName:
+      type: string
+      pattern: "^[a-z0-9][a-z0-9._-]{0,62}$"
+    Ident:
+      type: string
+      description: A user or group name, taken verbatim from the identity source; exact and case-sensitive.
+      minLength: 1
+      maxLength: 256
+      not: { const: "*" }
+    Selector:
+      type: string
+      description: '"*" (any) or a name.'
+      minLength: 1
+      maxLength: 256
+    RealmSelector:
+      oneOf:
+        - { type: string, const: "*" }
+        - $ref: "#/components/schemas/RealmName"
+    Prefix:
+      type: string
+      description: |
+        An IPv4 or IPv6 address or CIDR prefix. In responses it is always the
+        canonical form: host bits cleared, IPv4-mapped IPv6 converted to IPv4,
+        IPv6 in lowercase compressed form.
+      examples: ["203.0.113.7/32", "2001:db8:1234:5678::/64"]
+    TTL:
+      type: string
+      pattern: "^(unlimited|[0-9]{1,12}[smhd])$"
+      description: A positive duration with unit s, m, h or d, at most 3650d; or `unlimited`.
+      examples: ["3600s", "90m", "36h", "30d", "unlimited"]
+    KeyId:
+      type: string
+      pattern: "^[a-z2-7]{16}$"
+    KeyKind:
+      type: string
+      enum: [admin, client, worker]
+    RuleList:
+      type: string
+      enum: [ip, prefix, ttl, cap]
+    EntryState:
+      type: string
+      description: |
+        `active`: every matching worker applied it. `pending`: a matching
+        worker has not caught up. `partial`: some workers rejected it, the rest
+        applied it. `rejected`: every matching worker rejected it. `unrouted`:
+        no worker matches it (only after a routing change). `removing`:
+        deleted or expired, but a worker that held it has not confirmed
+        removal. `removed`: deleted and confirmed. `expired`: expired and
+        confirmed.
+      enum: [active, pending, partial, rejected, unrouted, removing, removed, expired]
+    WorkerEntryState:
+      type: string
+      description: |
+        An entry's state on one worker. A live entry also lists, as
+        `removing`, a worker that stopped matching it and has not yet
+        confirmed removing it; such a worker does not count towards the
+        entry's overall state.
+      enum: [active, pending, rejected, removing, removed, expired]
+    ErrorCode:
+      type: string
+      enum:
+        - invalid_request
+        - unauthenticated
+        - forbidden
+        - realm_not_allowed
+        - not_found
+        - method_not_allowed
+        - conflict
+        - confirmation_required
+        - body_too_large
+        - submission_rejected
+        - too_many_attempts
+        - too_many_streams
+        - internal
+        - unavailable
+    SubmissionResultCode:
+      type: string
+      description: In check order.
+      enum:
+        - realm_not_allowed
+        - invalid_prefix
+        - no_subscriber
+        - ip_denied
+        - prefix_too_broad
+        - ttl_exceeded
+        - cap_exceeded
+    WorkerRejectionCode:
+      type: string
+      description: |
+        `prefix_too_broad`: broader than the worker's floor allows.
+        `address_not_allowed`: outside the worker's safety floor.
+        `family_unsupported`: the worker cannot apply this address family.
+        `capacity_exceeded`: the worker has no room for it (for example, a full
+        firewall object). `invalid`: refused for another reason.
+      enum: [prefix_too_broad, address_not_allowed, family_unsupported, capacity_exceeded, invalid]
+    ImpactEffect:
+      type: string
+      enum: [unrouted, ip_denied, prefix_too_broad, ttl_exceeded, cap_exceeded]
+    ImpactAction:
+      type: string
+      description: |
+        `remove`: soft-deleted (`ip_denied`, `prefix_too_broad`,
+        `cap_exceeded`). `shorten`: expiry set to now plus the TTL rule's max
+        (`ttl_exceeded`). `none`: the entry stays (`unrouted`).
+      enum: [remove, shorten, none]
+
+    # ---------- errors
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: "#/components/schemas/ErrorCode" }
+            message:
+              type: string
+              description: For humans; may change.
+            fields:
+              type: object
+              description: Per-field validation messages.
+              additionalProperties: { type: string }
+            results:
+              type: array
+              description: With `submission_rejected`, one item per group.
+              items: { $ref: "#/components/schemas/GroupResult" }
+            impact:
+              type: array
+              description: With `confirmation_required`.
+              items: { $ref: "#/components/schemas/ImpactItem" }
+    SubmissionRejected:
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          properties:
+            error:
+              type: object
+              required: [results]
+              properties:
+                code: { const: submission_rejected }
+    GroupResult:
+      type: object
+      required: [group, ok]
+      properties:
+        group: { $ref: "#/components/schemas/Ident" }
+        ok: { type: boolean }
+        code: { $ref: "#/components/schemas/SubmissionResultCode" }
+        limit: { $ref: "#/components/schemas/Limit" }
+    Limit:
+      type: object
+      description: Present for `ttl_exceeded`, `prefix_too_broad` and `cap_exceeded`.
+      properties:
+        max_ttl: { $ref: "#/components/schemas/TTL" }
+        min_prefix_len: { type: integer, minimum: 0, maximum: 128 }
+        max_prefixes: { type: integer, minimum: 0 }
+
+    # ---------- submissions and entries
+
+    SubmissionRequest:
+      type: object
+      additionalProperties: false
+      required: [user, groups, prefix, ttl]
+      properties:
+        realm:
+          $ref: "#/components/schemas/RealmName"
+          description: Optional only when the client is bound to exactly one realm.
+        user: { $ref: "#/components/schemas/Ident" }
+        groups:
+          type: array
+          description: Duplicates are removed.
+          minItems: 1
+          maxItems: 32
+          items: { $ref: "#/components/schemas/Ident" }
+        prefix: { $ref: "#/components/schemas/Prefix" }
+        ttl: { $ref: "#/components/schemas/TTL" }
+      examples:
+        - realm: authentik
+          user: patrick
+          groups: [fwusers, guests]
+          prefix: "2001:db8:1234:5678::/64"
+          ttl: 30d
+    SubmissionResponse:
+      type: object
+      required: [submission_id, prefix, entries]
+      properties:
+        submission_id: { $ref: "#/components/schemas/UUID" }
+        prefix: { $ref: "#/components/schemas/Prefix" }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [id, realm, user, group, prefix, expires_at, replaced, state, workers]
+            properties:
+              id: { $ref: "#/components/schemas/UUID" }
+              realm: { $ref: "#/components/schemas/RealmName" }
+              user: { $ref: "#/components/schemas/Ident" }
+              group: { $ref: "#/components/schemas/Ident" }
+              prefix: { $ref: "#/components/schemas/Prefix" }
+              expires_at:
+                $ref: "#/components/schemas/NullableTimestamp"
+                description: Null when unlimited.
+              replaced:
+                type: boolean
+                description: True when an existing entry was replaced in place.
+              state: { $ref: "#/components/schemas/EntryState" }
+              workers:
+                type: array
+                items: { $ref: "#/components/schemas/ClientWorkerState" }
+    ClientWorkerState:
+      type: object
+      required: [label, state]
+      properties:
+        label: { type: string }
+        state: { $ref: "#/components/schemas/WorkerEntryState" }
+        code:
+          $ref: "#/components/schemas/WorkerRejectionCode"
+          description: Present when `state` is `rejected`.
+    AdminWorkerState:
+      allOf:
+        - $ref: "#/components/schemas/ClientWorkerState"
+        - type: object
+          required: [id, name, last_seen_at]
+          properties:
+            id: { $ref: "#/components/schemas/UUID" }
+            name: { type: string }
+            last_seen_at: { $ref: "#/components/schemas/NullableTimestamp" }
+    EntryBase:
+      type: object
+      required: [id, submission_id, realm, user, group, prefix, expires_at, created_at, updated_at, deleted_at, state]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        submission_id: { $ref: "#/components/schemas/UUID" }
+        realm: { $ref: "#/components/schemas/RealmName" }
+        user: { $ref: "#/components/schemas/Ident" }
+        group: { $ref: "#/components/schemas/Ident" }
+        prefix: { $ref: "#/components/schemas/Prefix" }
+        expires_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+          description: Null when unlimited.
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+        deleted_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        state: { $ref: "#/components/schemas/EntryState" }
+    Entry:
+      description: An entry as clients see it. Workers are ordered by label, then id.
+      allOf:
+        - $ref: "#/components/schemas/EntryBase"
+        - type: object
+          required: [workers]
+          properties:
+            workers:
+              type: array
+              items: { $ref: "#/components/schemas/ClientWorkerState" }
+    AdminEntry:
+      allOf:
+        - $ref: "#/components/schemas/EntryBase"
+        - type: object
+          required: [workers, client_id, key_id, revision, deleted_by]
+          properties:
+            workers:
+              type: array
+              items: { $ref: "#/components/schemas/AdminWorkerState" }
+            client_id:
+              type: [string, "null"]
+              format: uuid
+              description: Null once the client is deleted.
+            key_id: { type: [string, "null"] }
+            revision: { type: integer, format: int64 }
+            deleted_by:
+              type: [string, "null"]
+              description: The actor that deleted it.
+    EntryEvent:
+      type: object
+      required: [id, state]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        state: { $ref: "#/components/schemas/EntryState" }
+
+    # ---------- worker
+
+    DesiredState:
+      type: object
+      required: [revision, generated_at, next_change_at, families, entries]
+      properties:
+        revision: { type: integer, format: int64, minimum: 0 }
+        generated_at:
+          $ref: "#/components/schemas/Timestamp"
+          description: Database time of the snapshot, with microseconds. Echo it in the status report.
+        next_change_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+          description: The earliest non-null `expires_at` among the entries, or null.
+        families:
+          type: array
+          items: { type: string, enum: [ipv4, ipv6] }
+        entries:
+          type: array
+          items:
+            type: object
+            required: [prefix, expires_at]
+            properties:
+              prefix: { $ref: "#/components/schemas/Prefix" }
+              expires_at: { $ref: "#/components/schemas/NullableTimestamp" }
+    ChangedEvent:
+      type: object
+      required: [revision]
+      properties:
+        revision: { type: integer, format: int64 }
+    StatusReport:
+      description: Exactly one of `generated_at` (success) or `error` (failure).
+      oneOf:
+        - type: object
+          title: Success
+          additionalProperties: false
+          required: [instance, revision, generated_at]
+          properties:
+            instance:
+              type: string
+              minLength: 1
+              maxLength: 128
+              description: Names the process that sent the report (for example a host name), for diagnostics.
+            version: { type: string, maxLength: 64 }
+            revision:
+              type: integer
+              format: int64
+              minimum: 0
+              description: The revision of the desired state applied; at most the current revision.
+            generated_at:
+              $ref: "#/components/schemas/Timestamp"
+              description: The `generated_at` of the desired state applied (or the `IPValet-Generated-At` of a 304); not in the future.
+            rejected:
+              type: array
+              maxItems: 200
+              description: |
+                At most 200 items with details of at most 200 characters, so
+                that the largest report (about 59 KB) fits in the default 64 KiB
+                body limit. A worker with more rejections reports an error.
+              items:
+                type: object
+                additionalProperties: false
+                required: [prefix, code]
+                properties:
+                  prefix: { $ref: "#/components/schemas/Prefix" }
+                  code: { $ref: "#/components/schemas/WorkerRejectionCode" }
+                  detail: { type: string, maxLength: 200, description: Shown to admins only. }
+        - type: object
+          title: Failure
+          additionalProperties: false
+          required: [instance, revision, error]
+          properties:
+            instance:
+              type: string
+              minLength: 1
+              maxLength: 128
+              description: Names the process that sent the report (for example a host name), for diagnostics.
+            version: { type: string, maxLength: 64 }
+            revision: { type: integer, format: int64, minimum: 0 }
+            error: { type: string, minLength: 1, maxLength: 2000 }
+
+    # ---------- admin objects
+
+    Warning:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string, enum: [rule_shadowed, cross_realm_selector] }
+        message: { type: string }
+        rule_id:
+          $ref: "#/components/schemas/UUID"
+          description: With `rule_shadowed`, the rule that never decides.
+        shadowed_by:
+          $ref: "#/components/schemas/UUID"
+          description: With `rule_shadowed`, the earlier rule that always decides first.
+        subscription_id:
+          $ref: "#/components/schemas/UUID"
+          description: With `cross_realm_selector`.
+    ImpactItem:
+      type: object
+      required: [entry_id, realm, user, group, prefix, effect, action]
+      description: |
+        A live, unexpired entry the change affects, the rule it would fail
+        (`effect`) and what a confirmed change does to it (`action`). Each
+        entry appears at most once.
+      properties:
+        entry_id: { $ref: "#/components/schemas/UUID" }
+        realm: { $ref: "#/components/schemas/RealmName" }
+        user: { $ref: "#/components/schemas/Ident" }
+        group: { $ref: "#/components/schemas/Ident" }
+        prefix: { $ref: "#/components/schemas/Prefix" }
+        effect: { $ref: "#/components/schemas/ImpactEffect" }
+        action: { $ref: "#/components/schemas/ImpactAction" }
+    MutationExtras:
+      type: object
+      description: Fields added to every admin mutation response.
+      required: [warnings]
+      properties:
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/Warning" }
+        impact:
+          type: array
+          description: With `dry_run=true` or `confirm=true`.
+          items: { $ref: "#/components/schemas/ImpactItem" }
+        enforced:
+          type: object
+          description: With `confirm=true`, how many entries the change shortened and removed.
+          required: [shortened, removed]
+          properties:
+            shortened: { type: integer, minimum: 0 }
+            removed: { type: integer, minimum: 0 }
+        dry_run:
+          type: boolean
+          description: Present and true for a dry run; nothing was saved.
+    Realm:
+      type: object
+      required: [name, created_at]
+      properties:
+        name: { $ref: "#/components/schemas/RealmName" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    RealmDeleteResult:
+      type: object
+      required: [name, entries_removed, rules_deleted, subscriptions_deleted, clients_unbound, revision]
+      properties:
+        name: { $ref: "#/components/schemas/RealmName" }
+        entries_removed: { type: integer, minimum: 0 }
+        rules_deleted: { type: integer, minimum: 0 }
+        subscriptions_deleted: { type: integer, minimum: 0 }
+        clients_unbound: { type: integer, minimum: 0 }
+        revision:
+          type: [integer, "null"]
+          format: int64
+          description: The revision bumped, or null when nothing needed one.
+    Client:
+      type: object
+      description: |
+        A client may act on any user and group in its realms; what it may
+        register there is limited by the realms' rules.
+      required: [id, name, realms, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        realms:
+          type: array
+          items: { $ref: "#/components/schemas/RealmName" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    ClientCreate:
+      type: object
+      additionalProperties: false
+      required: [name, realms]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        realms:
+          type: array
+          minItems: 1
+          description: Existing realms.
+          items: { $ref: "#/components/schemas/RealmName" }
+    ClientPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        realms:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/RealmName" }
+    ClientMutation:
+      allOf:
+        - $ref: "#/components/schemas/Client"
+        - $ref: "#/components/schemas/MutationExtras"
+    Worker:
+      type: object
+      description: A subscriber that applies the entries routed to it and reports what it applied.
+      required: [id, name, label, ipv4, ipv6, applied_revision, applied_generated_at, subscriptions_revision,
+        last_seen_at, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: The admin handle.
+        label:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: The only worker field clients see.
+        ipv4: { type: boolean }
+        ipv6: { type: boolean }
+        applied_revision: { type: integer, format: int64 }
+        applied_generated_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        subscriptions_revision: { type: integer, format: int64 }
+        last_seen_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    WorkerCreate:
+      type: object
+      additionalProperties: false
+      required: [name, label, ipv4, ipv6]
+      description: At least one of `ipv4` and `ipv6` must be true.
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        label: { type: string, minLength: 1, maxLength: 256 }
+        ipv4: { type: boolean }
+        ipv6: { type: boolean }
+    WorkerPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 128 }
+        label: { type: string, minLength: 1, maxLength: 256 }
+        ipv4: { type: boolean }
+        ipv6: { type: boolean }
+    WorkerMutation:
+      allOf:
+        - $ref: "#/components/schemas/Worker"
+        - $ref: "#/components/schemas/MutationExtras"
+    Subscription:
+      type: object
+      required: [id, worker_id, realm, user, group, created_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        worker_id: { $ref: "#/components/schemas/UUID" }
+        realm: { $ref: "#/components/schemas/RealmSelector" }
+        user: { $ref: "#/components/schemas/Selector" }
+        group: { $ref: "#/components/schemas/Selector" }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+    SubscriptionCreate:
+      type: object
+      additionalProperties: false
+      required: [realm, user, group]
+      properties:
+        realm: { $ref: "#/components/schemas/RealmSelector" }
+        user: { $ref: "#/components/schemas/Selector" }
+        group: { $ref: "#/components/schemas/Selector" }
+    SubscriptionMutation:
+      allOf:
+        - $ref: "#/components/schemas/Subscription"
+        - $ref: "#/components/schemas/MutationExtras"
+    Key:
+      type: object
+      description: A key record. Never contains the secret or its hash.
+      required: [id, kind, client_id, worker_id, name, created_at, expires_at, revoked_at, last_used_at]
+      properties:
+        id: { $ref: "#/components/schemas/KeyId" }
+        kind: { $ref: "#/components/schemas/KeyKind" }
+        client_id: { type: [string, "null"], format: uuid }
+        worker_id: { type: [string, "null"], format: uuid }
+        name: { type: string }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        expires_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        revoked_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        last_used_at:
+          $ref: "#/components/schemas/NullableTimestamp"
+          description: Recorded at most once a minute.
+    KeyCreate:
+      type: object
+      additionalProperties: false
+      required: [kind, name]
+      description: Client keys need `client_id`, worker keys need `worker_id`, admin keys need neither.
+      properties:
+        kind: { $ref: "#/components/schemas/KeyKind" }
+        client_id: { $ref: "#/components/schemas/UUID" }
+        worker_id: { $ref: "#/components/schemas/UUID" }
+        name: { type: string, minLength: 1, maxLength: 128 }
+        expires_at:
+          $ref: "#/components/schemas/Timestamp"
+          description: Optional; must be in the future.
+
+    # ---------- rules
+
+    RuleCommon:
+      type: object
+      required: [id, realm, list, position, user, group, description, created_at, updated_at]
+      properties:
+        id: { $ref: "#/components/schemas/UUID" }
+        realm: { $ref: "#/components/schemas/RealmName" }
+        list: { $ref: "#/components/schemas/RuleList" }
+        position: { type: integer, minimum: 1 }
+        user: { $ref: "#/components/schemas/Selector" }
+        group: { $ref: "#/components/schemas/Selector" }
+        description: { type: [string, "null"] }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        updated_at: { $ref: "#/components/schemas/Timestamp" }
+    IPRule:
+      allOf:
+        - $ref: "#/components/schemas/RuleCommon"
+        - type: object
+          description: |
+            The first rule whose selector matches and whose prefix overlaps the
+            submitted prefix decides: `deny` rejects; `accept` accepts only if
+            the submitted prefix lies entirely inside the rule's prefix. No
+            matching rule rejects.
+          required: [list, prefix, action]
+          properties:
+            list: { const: ip }
+            prefix: { $ref: "#/components/schemas/Prefix" }
+            action: { type: string, enum: [accept, deny] }
+    PrefixRule:
+      allOf:
+        - $ref: "#/components/schemas/RuleCommon"
+        - type: object
+          description: The shortest prefix length allowed per family; null means no limit.
+          required: [list, min_len_v4, min_len_v6]
+          properties:
+            list: { const: prefix }
+            min_len_v4: { type: [integer, "null"], minimum: 0, maximum: 32 }
+            min_len_v6: { type: [integer, "null"], minimum: 0, maximum: 128 }
+    TTLRule:
+      allOf:
+        - $ref: "#/components/schemas/RuleCommon"
+        - type: object
+          description: |
+            A submitted TTL must not exceed `max_ttl` (`unlimited` allows any).
+            An existing entry exceeds it when its lifetime left is longer than
+            `max_ttl`, or it is unlimited under a finite `max_ttl`.
+          required: [list, max_ttl]
+          properties:
+            list: { const: ttl }
+            max_ttl: { $ref: "#/components/schemas/TTL" }
+    CapRule:
+      allOf:
+        - $ref: "#/components/schemas/RuleCommon"
+        - type: object
+          description: |
+            The user's distinct live, unexpired prefixes in the realm whose own
+            first-matching cap rule is this one, including the candidate, must
+            not exceed `max_prefixes`.
+          required: [list, max_prefixes]
+          properties:
+            list: { const: cap }
+            max_prefixes: { type: integer, minimum: 0 }
+    Rule:
+      oneOf:
+        - $ref: "#/components/schemas/IPRule"
+        - $ref: "#/components/schemas/PrefixRule"
+        - $ref: "#/components/schemas/TTLRule"
+        - $ref: "#/components/schemas/CapRule"
+      discriminator:
+        propertyName: list
+        mapping:
+          ip: "#/components/schemas/IPRule"
+          prefix: "#/components/schemas/PrefixRule"
+          ttl: "#/components/schemas/TTLRule"
+          cap: "#/components/schemas/CapRule"
+    RuleMutation:
+      allOf:
+        - $ref: "#/components/schemas/Rule"
+        - $ref: "#/components/schemas/MutationExtras"
+    RuleCreate:
+      description: The body for the list named in the path.
+      oneOf:
+        - title: IP rule
+          type: object
+          additionalProperties: false
+          required: [user, group, prefix, action]
+          properties:
+            user: { $ref: "#/components/schemas/Selector" }
+            group: { $ref: "#/components/schemas/Selector" }
+            position: { type: integer, minimum: 1 }
+            description: { type: [string, "null"], maxLength: 1000 }
+            prefix: { $ref: "#/components/schemas/Prefix" }
+            action: { type: string, enum: [accept, deny] }
+        - title: Prefix rule
+          type: object
+          additionalProperties: false
+          required: [user, group]
+          properties:
+            user: { $ref: "#/components/schemas/Selector" }
+            group: { $ref: "#/components/schemas/Selector" }
+            position: { type: integer, minimum: 1 }
+            description: { type: [string, "null"], maxLength: 1000 }
+            min_len_v4: { type: [integer, "null"], minimum: 0, maximum: 32 }
+            min_len_v6: { type: [integer, "null"], minimum: 0, maximum: 128 }
+        - title: TTL rule
+          type: object
+          additionalProperties: false
+          required: [user, group, max_ttl]
+          properties:
+            user: { $ref: "#/components/schemas/Selector" }
+            group: { $ref: "#/components/schemas/Selector" }
+            position: { type: integer, minimum: 1 }
+            description: { type: [string, "null"], maxLength: 1000 }
+            max_ttl: { $ref: "#/components/schemas/TTL" }
+        - title: Cap rule
+          type: object
+          additionalProperties: false
+          required: [user, group, max_prefixes]
+          properties:
+            user: { $ref: "#/components/schemas/Selector" }
+            group: { $ref: "#/components/schemas/Selector" }
+            position: { type: integer, minimum: 1 }
+            description: { type: [string, "null"], maxLength: 1000 }
+            max_prefixes: { type: integer, minimum: 0 }
+    RulePatch:
+      description: Any of the fields of the list named in the path; fields present replace the stored ones.
+      type: object
+      additionalProperties: false
+      properties:
+        user: { $ref: "#/components/schemas/Selector" }
+        group: { $ref: "#/components/schemas/Selector" }
+        position: { type: integer, minimum: 1 }
+        description: { type: [string, "null"], maxLength: 1000 }
+        prefix: { $ref: "#/components/schemas/Prefix" }
+        action: { type: string, enum: [accept, deny] }
+        min_len_v4: { type: [integer, "null"], minimum: 0, maximum: 32 }
+        min_len_v6: { type: [integer, "null"], minimum: 0, maximum: 128 }
+        max_ttl: { $ref: "#/components/schemas/TTL" }
+        max_prefixes: { type: integer, minimum: 0 }
+
+    # ---------- health and audit
+
+    WorkerHealth:
+      type: object
+      required: [worker_id, name, label, applied_revision, revision, lag, applied_generated_at, last_seen_at,
+        last_error, last_error_at, last_instance, last_version, worker_streams, rejections]
+      properties:
+        worker_id: { $ref: "#/components/schemas/UUID" }
+        name: { type: string }
+        label: { type: string }
+        applied_revision: { type: integer, format: int64 }
+        revision:
+          type: integer
+          format: int64
+          description: The current global revision.
+        lag:
+          type: integer
+          format: int64
+          description: "`revision` minus `applied_revision`."
+        applied_generated_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        last_seen_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        last_error: { type: [string, "null"] }
+        last_error_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        last_instance: { type: [string, "null"] }
+        last_version: { type: [string, "null"] }
+        worker_streams:
+          type: integer
+          minimum: 0
+          description: Event streams this worker has open to the API server that answered.
+        rejections:
+          type: array
+          items:
+            type: object
+            required: [prefix, code, detail, revision]
+            properties:
+              prefix: { $ref: "#/components/schemas/Prefix" }
+              code: { $ref: "#/components/schemas/WorkerRejectionCode" }
+              detail: { type: [string, "null"] }
+              revision: { type: integer, format: int64 }
+    AuditEntry:
+      type: object
+      required: [id, at, actor, client_id, action, object_type, object_id, realm, user, group, prefix, details]
+      properties:
+        id: { type: integer, format: int64 }
+        at: { $ref: "#/components/schemas/Timestamp" }
+        actor:
+          type: string
+          description: A key id, `admin:env` or `system`.
+        client_id: { type: [string, "null"], format: uuid }
+        action: { type: string }
+        object_type: { type: string }
+        object_id: { type: [string, "null"] }
+        realm: { type: [string, "null"] }
+        user: { type: [string, "null"] }
+        group: { type: [string, "null"] }
+        prefix: { type: [string, "null"] }
+        details: { type: object }
