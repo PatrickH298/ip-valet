@@ -69,6 +69,9 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 - **The caller's address.** Behind the reverse proxy every connection comes from the proxy, so the server reads `X-Forwarded-For` only when the connection comes from a configured trusted proxy, taking the rightmost address that is not a trusted proxy. A client cannot pick its address by sending the header itself.
 - **Event streams.** Each key may hold a few open event streams per API instance (4 by default), so a leaked key cannot multiply the work every change causes.
 - **No caching.** Responses under `/v1` carry `Cache-Control: no-store`, since they can hold new keys and address lists.
+- **Bad keys cost nothing.** Each instance keeps every key's id and secret hash in memory (they never change), so an unknown key or a wrong secret is refused without touching the database. Whether a key is revoked or expired is still read from the database on every request.
+- **Admin API on its own listener.** The admin API is served on a separate port (8081 by default) that the reverse proxy never exposes; the public port answers `/v1/admin/*` with 404. An admin key, which controls everything, is then useless from the internet even if it leaks.
+- **Key hygiene.** Admin keys should expire; creating one without an expiry returns a warning. The admin health view lists keys about to expire (an unattended worker would stop) and keys unused for 30 days (likely forgotten). Audit rows record the caller's address.
 - There are no rate limits on authenticated requests for now.
 
 ## Data model
@@ -282,10 +285,10 @@ All paths are under `/v1`, and the OpenAPI file in `spec/` is the contract other
 | Worker | `GET /v1/worker/desired-state` | The worker's desired state |
 | Worker | `GET /v1/worker/events` | SSE change signals |
 | Worker | `POST /v1/worker/status` | Applied revision, rejections, or an error |
-| Admin | `/v1/admin/realms`, `/clients`, `/workers`, `/workers/{id}/subscriptions`, `/subscriptions/{id}`, `/keys` | Create, read, update, delete; keys are shown once at creation |
+| Admin (admin port) | `/v1/admin/realms`, `/clients`, `/workers`, `/workers/{id}/subscriptions`, `/subscriptions/{id}`, `/keys` | Create, read, update, delete; keys are shown once at creation |
 | Admin | `/v1/admin/realms/{realm}/rules/{ip,prefix,ttl,cap}` | Rule lists, including reordering |
 | Admin | `GET /v1/admin/entries`, `DELETE /v1/admin/entries/{id}` | Any entry, any realm |
-| Admin | `GET /v1/admin/workers/{id}/health`, `GET /v1/admin/health`, `GET /v1/admin/audit` | Worker health and errors; audit log |
+| Admin (admin port) | `GET /v1/admin/workers/{id}/health`, `GET /v1/admin/health`, `GET /v1/admin/audit` | Worker health and errors; audit log |
 | None | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness, readiness (database reachable), Prometheus metrics (separate port) |
 
 A client sees, replaces and deletes everything in its realms, including entries another client submitted into a shared realm. Admin changes that affect existing entries return their impact and need `confirm=true` (see Matching and rules).
@@ -315,7 +318,9 @@ The API server is written in Go: `net/http` (method-and-path routing, SSE), `net
 | Time | All expiry is computed from the database clock, never the API host's. |
 | Migrations | Versioned SQL files (goose) run at startup inside a transaction, under a Postgres advisory lock so two instances cannot run them at once. |
 | Retention | Expired and removed entries are purged after 90 days, the audit log after 1 year; both configurable. The purge job takes an advisory lock. |
-| Health | `/healthz` reports the process is up; `/readyz` that the database is reachable and the `LISTEN` connection is up. |
+| Health | `/healthz` reports the process is up; `/readyz` that the database is reachable (checked at most once a second) and the `LISTEN` connection is up. |
+| Deployment | `deploy/compose.example.yaml`: the API with a read-only filesystem, no capabilities and `no-new-privileges`; Postgres on an internal network with a non-superuser role for the API; the admin port bound to the host or a trusted network. |
+| Dependencies | Weekly update pull requests (Dependabot for now, Renovate later); govulncheck in every CI run, including the weekly one. |
 | Metrics | Prometheus, on a separate port: submissions by result code, per-worker `last_seen_at`, per-worker revision lag (current revision minus `applied_revision`), connected workers. External monitoring alerts when a worker falls behind or goes quiet. |
 | Configuration | Environment variables only, with built-in defaults (for example `IPVALET_DEFAULT_TTL=30d`); secrets also accept `_FILE` variants. |
 | Existing data | Start empty; no import from `unifi-ip-valet`. |
@@ -347,7 +352,7 @@ ip-valet/
 │   └── unifi/                 # language chosen per worker
 ├── clients/
 │   └── web/                   # language chosen per client
-├── deploy/compose.example.yaml
+├── deploy/                    # compose example, Postgres init script, setup notes
 └── .github/workflows/
 ```
 
@@ -367,6 +372,7 @@ Questions that were open in the first draft, and how they were settled.
 | Deleting a realm that still has entries | Its entries are removed (they read `removing` until each worker that held them confirms); warning the admin is up to the admin dashboard. |
 | A submitted prefix with host bits set (`203.0.113.7/24`) | Normalised to `203.0.113.0/24`; the canonical form is returned. |
 | `DEFAULT_TTL` for seeded TTL rules | Set per deployment by environment variable (`IPVALET_DEFAULT_TTL`), default 30 days; used only when a realm is created. |
+| Admin API exposure | On its own listener, never behind the public proxy. |
 | Rate limits | None for now. Failed authentication is throttled per network instead (see Trust model and authentication). |
 | Per-client user and group allow-lists | Removed. A client's scope is its realms; the realms' rules bound what it can register. |
 | Existing entries that a rule change makes invalid | Always enforced on confirmation: removed or shortened. Caps keep the most recently submitted prefixes. |
