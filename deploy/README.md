@@ -1,130 +1,144 @@
 # Deploying ip-valet
 
-[`compose.example.yaml`](compose.example.yaml) runs the API server, its
-Postgres database and the admin dashboard behind your existing reverse proxy,
-which terminates TLS.
+[`compose.example.yaml`](compose.example.yaml) runs Postgres, the API server
+and the admin dashboard with Docker Compose. Every setting is an environment
+variable, set or listed (commented out, with its default and a definition) in
+the file itself. Settings marked *secret* can come from files instead, such as
+Docker secrets; the file shows that setup commented out.
 
-| Port | Serves | Who should reach it |
+| Port | Service | Serves |
 | --- | --- | --- |
-| 8080 | Client and worker API, `/healthz`, `/readyz` | Your reverse proxy only |
-| 8081 | Admin API (`/v1/admin/*`), `/healthz`, `/readyz` | This host, or your LAN or VPN; never the internet |
-| 9090 | Prometheus `/metrics` | Your monitoring, over an internal network |
-| 8090 | Admin dashboard | This host, or your proxy over HTTPS for the people who manage ip-valet |
+| 8080 | `api` | Client and worker API, `/healthz`, `/readyz` |
+| 8081 | `api` | Admin API (`/v1/admin/*`), `/healthz`, `/readyz` |
+| 9090 | `api` | Prometheus `/metrics` (not published in the example) |
+| 8090 | `dashboard` | Admin dashboard |
 
-## Setup
+The services share the project's default network. Other containers on that
+network reach the API directly at `http://api:8080` and `http://api:8081`. Where
+the ports are published, and whether a reverse proxy sits in front, is up to
+you.
 
-1. **Copy this directory** to the host and work inside it.
+## First start
 
-2. **Create the secrets.** Each one is a file under `secrets/`, mounted into
-   the container that needs it:
+1. **Copy the example** and set a database password. It appears twice: in
+   `POSTGRES_PASSWORD` and inside `IPVALET_DATABASE_URL`.
 
    ```bash
-   mkdir -p secrets
-   openssl rand -hex 32 > secrets/postgres_password
-   openssl rand -hex 32 > secrets/ipvalet_db_password
-   printf 'postgres://ipvalet:%s@db:5432/ipvalet?sslmode=disable\n' "$(cat secrets/ipvalet_db_password)" > secrets/ipvalet_database_url
+   cp compose.example.yaml compose.yaml
    ```
 
-   The files are mounted with their host owner and mode. The API runs as user
-   65532 and Postgres as user 999, so give each file to the user that reads it:
+2. **Start Postgres and the API:**
 
    ```bash
-   sudo chown 65532 secrets/ipvalet_database_url
+   docker compose up -d db api
    ```
 
+   The API creates its database if it does not exist (the role needs to be
+   allowed to create databases, which the example's role is), then runs its
+   migrations.
+
+3. **Create an admin key for yourself.** It is printed once; keep it:
+
    ```bash
-   sudo chown 999 secrets/postgres_password secrets/ipvalet_db_password
+   docker compose exec api ipvalet-api create-admin-key --name bootstrap --expires 90d
    ```
 
-   ```bash
-   sudo chmod 0400 secrets/*
-   ```
+   Alternatively, set `IPVALET_ADMIN_KEY` (or `IPVALET_ADMIN_KEY_HASH`) on the
+   `api` service to a key you generate; see the [API README](../api/README.md).
 
-3. **Tell the API where your proxy is.** Create `.env` next to the compose
-   file with the proxy's address, or the subnet of the shared `proxy` network:
-
-   ```bash
-   echo 'IPVALET_TRUSTED_PROXIES=172.18.0.0/16' > .env
-   ```
-
-   The API believes `X-Forwarded-For` only from these addresses. Without the
-   setting, Compose refuses to start.
-
-4. **Connect the proxy network.** The compose file joins an external network
-   named `proxy`. Create it, or rename it to the one your proxy already uses.
-
-5. **Start the API** (Compose starts the database with it):
+4. **Give the dashboard its own key.** Create it, paste it into
+   `IPVALET_DASHBOARD_API_KEY` in `compose.yaml`, and start the dashboard:
 
    ```bash
-   docker compose -f compose.example.yaml up -d api
-   ```
-
-   On first start, `postgres-init/10-ipvalet.sh` creates the `ipvalet` role,
-   which owns only the `ipvalet` database and is not a superuser. The API runs
-   its migrations as that role.
-
-6. **Create the first admin key** and keep it somewhere safe; it is shown once:
-
-   ```bash
-   docker compose -f compose.example.yaml exec api ipvalet-api create-admin-key --name bootstrap --expires 90d
-   ```
-
-7. **Set up the dashboard.** Give it its own admin key, with an expiry, then
-   start it:
-
-   ```bash
-   docker compose -f compose.example.yaml exec -T api ipvalet-api create-admin-key --name dashboard --expires 365d > secrets/dashboard_api_key
+   docker compose exec api ipvalet-api create-admin-key --name dashboard --expires 365d
    ```
 
    ```bash
-   sudo chown 65532 secrets/dashboard_api_key && sudo chmod 0400 secrets/dashboard_api_key
+   docker compose up -d dashboard
+   ```
+
+5. **Sign in to the dashboard** at port 8090 with user name **`admin`** and
+   password **`admin`**. The Account page opens; choose a new password there
+   (the dashboard cannot be used until you do). The login is kept in the
+   `dashboard-data` volume.
+
+## Using secrets instead of environment variables
+
+Any setting marked *secret* in the example (the database URL, the admin key,
+the dashboard's API key and the Postgres password) can be read from a file by
+adding `_FILE` to its name. With Docker secrets:
+
+1. Write each value to a file under `secrets/`:
+
+   ```bash
+   mkdir -p secrets && openssl rand -hex 32 > secrets/postgres_password
    ```
 
    ```bash
-   docker compose -f compose.example.yaml up -d dashboard
+   printf 'postgres://ipvalet:%s@db:5432/ipvalet?sslmode=disable\n' "$(cat secrets/postgres_password)" > secrets/ipvalet_database_url
    ```
-
-   It listens on `127.0.0.1:8090`. From another machine, use an SSH tunnel
-   (`ssh -L 8090:127.0.0.1:8090 <host>`, then open <http://localhost:8090>).
-
-   **Sign in with user name `admin` and password `admin`**, then choose a new
-   password on the Account page that opens; the dashboard cannot be used until
-   you do. The login is kept in the `dashboard-data` volume. To use the
-   dashboard from elsewhere, route a hostname to `dashboard:8090` in your proxy
-   over HTTPS, after changing the default login.
-
-   Lost the password? Reset the login to `admin` / `admin` and sign in again:
 
    ```bash
-   docker compose -f compose.example.yaml exec dashboard ipvalet-dashboard reset-login && docker compose -f compose.example.yaml restart dashboard
+   docker compose exec -T api ipvalet-api create-admin-key --name dashboard --expires 365d > secrets/dashboard_api_key
    ```
 
-8. **Route the public hostname** in your proxy to `api:8080`. Do not route
-   8081 or 9090.
+2. Make each file readable by the user its service runs as: 65532 for the API
+   and the dashboard, 999 for Postgres.
 
-## Security notes
+   ```bash
+   sudo chown 65532 secrets/ipvalet_database_url secrets/dashboard_api_key && sudo chown 999 secrets/postgres_password && sudo chmod 0400 secrets/*
+   ```
 
-- **Container hardening.** The API runs as a non-root user with a read-only
-  filesystem, no Linux capabilities and `no-new-privileges`. Postgres keeps
-  its default capabilities, because its entrypoint starts as root to set up
-  the data directory, but gets `no-new-privileges` and is on an internal
-  network with no published port.
-- **Database connection.** Inside one host's internal network,
-  `sslmode=disable` is acceptable. If Postgres runs on another host, use TLS
-  with certificate checks: `sslmode=verify-full&sslrootcert=/path/to/ca.crt`.
-  Without `verify-full`, the connection can be intercepted.
-- **Admin keys.** Give them an expiry (`--expires`, or `expires_at` in the
-  API) and replace them before it passes. `GET /v1/admin/health` lists active
-  keys expiring within 14 days or unused for 30 days.
-- **Environment admin key.** If you bootstrap with an environment key, prefer
-  `IPVALET_ADMIN_KEY_HASH`, so this host never holds the key, or
-  `IPVALET_ADMIN_KEY_FILE` over plain `IPVALET_ADMIN_KEY`.
-- **Dashboard.** It holds an admin key and gives full admin access to whoever
-  signs in. Change the default `admin` / `admin` login before exposing it, expose
-  it only over HTTPS, and revoke the dashboard's key if the host is
-  compromised. Failed sign-ins are
-  throttled per network, as the API throttles failed keys; authentik or
-  another forward-auth layer in front of it adds a second gate.
-- **Backups.** Back up the `db-data` volume or run `pg_dump` regularly.
-  Workers remove expired addresses on their own, so an outage never leaves
-  expired access open, but the database holds every entry and key.
+3. In `compose.yaml`, uncomment the `secrets:` block at the end, each service's
+   `secrets:` line and its `*_FILE` variables, and remove the plain variables
+   they replace (a variable and its `_FILE` form together are an error).
+
+## Client addresses and proxies
+
+The API and the dashboard record a client address in logs, and the API also
+records one in the audit log and uses it for the failed-authentication
+throttle. By default (`IPVALET_TRUSTED_PROXIES` and
+`IPVALET_DASHBOARD_TRUSTED_PROXIES` unset, or `*`), every peer's
+`X-Forwarded-For` header is believed, so a request can name any address. Set
+them to your reverse proxy's address or subnet to believe the header only
+from it, or to `none` to always use the connection's own address.
+
+The dashboard marks its session cookie `Secure` when the browser reached it
+over HTTPS, directly or through a proxy that sends `X-Forwarded-Proto`
+(`IPVALET_DASHBOARD_SECURE_COOKIES=auto`, the default). Set it to `true` or
+`false` to decide yourself.
+
+## Operating
+
+- **Lost dashboard password.** Reset the login to `admin` / `admin`, then sign
+  in and choose a new one:
+
+  ```bash
+  docker compose exec dashboard ipvalet-dashboard reset-login && docker compose restart dashboard
+  ```
+
+- **Admin keys** can carry an expiry (`--expires`, or `expires_at` in the API).
+  The dashboard's overview, and `GET /v1/admin/health`, list active keys
+  expiring within 14 days or unused for 30 days.
+- **Backups.** Back up the `db-data` volume, or run `pg_dump` regularly. It
+  holds every entry and key. Workers remove expired addresses on their own, so
+  a database outage does not leave expired access in place.
+- **Container settings.** The example runs the API and the dashboard with a
+  read-only filesystem (the dashboard writes only to its `/data` volume), no
+  Linux capabilities and `no-new-privileges`. Both images run as uid 65532.
+
+## Optional: a database role with fewer rights
+
+The example's role is a superuser of its own Postgres container. To have the
+API connect as a role that owns only its database, create the role and the
+database as a superuser, then point `IPVALET_DATABASE_URL` at that role:
+
+```bash
+docker compose exec db psql -U ipvalet -d postgres -c "CREATE ROLE ipvalet_app LOGIN PASSWORD 'another-password'" -c "CREATE DATABASE ipvalet_app OWNER ipvalet_app"
+```
+
+The API then finds its database already there and needs no further rights.
+Alternatively, `ALTER ROLE ipvalet_app CREATEDB` lets the API create it.
+
+When Postgres runs on another host, connect with TLS and certificate checks:
+`sslmode=verify-full&sslrootcert=/path/to/ca.crt` in the URL.
