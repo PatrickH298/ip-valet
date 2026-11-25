@@ -1,0 +1,35 @@
+{{define "content"}}{{with .Data}}
+<h1>Workers</h1>
+<p class="muted">A worker applies the entries routed to it, for example to a firewall, and reports which revision it applied.</p>
+{{if .Workers}}
+<table>
+  <thead><tr><th>Worker</th><th>Label</th><th>Families</th><th>Status</th><th>Last report</th></tr></thead>
+  <tbody>
+  {{- range .Workers}}
+  <tr>
+    <td><a href="/workers/{{.Worker.ID}}">{{.Worker.Name}}</a></td>
+    <td>{{.Worker.Label}}</td>
+    <td>{{if .Worker.IPv4}}IPv4{{end}}{{if and .Worker.IPv4 .Worker.IPv6}}, {{end}}{{if .Worker.IPv6}}IPv6{{end}}</td>
+    <td>{{if .Status}}<span class="badge {{.StatusClass}}">{{.Status}}</span>{{end}}</td>
+    <td>{{if .Worker.LastSeenAt}}<span title="{{ts .Worker.LastSeenAt}}">{{ago .Worker.LastSeenAt}}</span>{{else}}never{{end}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No workers yet.</p>{{end}}
+
+<h2>New worker</h2>
+<form method="post" action="/workers" class="stack">
+  {{template "formerror" .Form}}
+  <div class="row">
+    <label>Name <input name="name" value="{{.Form.Get "name"}}" required maxlength="128"> <small>your handle for it</small>{{template "err" (.Form.Err "name")}}</label>
+    <label>Label <input name="label" value="{{.Form.Get "label"}}" required maxlength="256"> <small>shown to clients</small>{{template "err" (.Form.Err "label")}}</label>
+  </div>
+  <fieldset><legend>Address families it applies</legend>
+    <label class="check"><input type="checkbox" name="ipv4"{{if .Form.Checked "ipv4"}} checked{{end}}> IPv4</label>
+    <label class="check"><input type="checkbox" name="ipv6"{{if .Form.Checked "ipv6"}} checked{{end}}> IPv6</label>
+    {{template "err" (.Form.Err "ipv4")}}{{template "err" (.Form.Err "ipv6")}}
+  </fieldset>
+  <div class="buttons"><button>Create worker</button></div>
+</form>
+{{end}}{{end}}

@@ -1,0 +1,12 @@
+{{define "content"}}{{with .Data}}
+<section class="narrow card">
+  <h1>Sign in</h1>
+  {{with .Error}}<p class="flash flash-error">{{.}}</p>{{end}}
+  <form method="post" action="/login" class="stack">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label>User name <input name="name" value="{{.Name}}" autocomplete="username" required autofocus></label>
+    <label>Password <input type="password" name="password" autocomplete="current-password" required></label>
+    <button>Sign in</button>
+  </form>
+</section>
+{{end}}{{end}}

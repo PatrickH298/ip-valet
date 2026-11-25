@@ -1,0 +1,29 @@
+{{define "content"}}{{with .Data}}
+<h1>Clients</h1>
+<p class="muted">A client registers addresses for users, such as a web page or a chat bot. It may act on any user and group in its realms, within the realms' rules.</p>
+{{if .Clients}}
+<table>
+  <thead><tr><th>Client</th><th>Realms</th><th>Created</th></tr></thead>
+  <tbody>
+  {{- range .Clients}}
+  <tr><td><a href="/clients/{{.ID}}">{{.Name}}</a></td><td>{{join .Realms ", "}}</td><td title="{{ts .CreatedAt}}">{{ago .CreatedAt}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No clients yet.</p>{{end}}
+
+<h2>New client</h2>
+{{if .Realms}}
+<form method="post" action="/clients" class="stack">
+  {{template "formerror" .Form}}
+  <label>Name <input name="name" value="{{.Form.Get "name"}}" required maxlength="128">{{template "err" (.Form.Err "name")}}</label>
+  <fieldset><legend>Realms it may act in</legend>
+    {{- range .Realms}}
+    <label class="check"><input type="checkbox" name="realms" value="{{.Name}}"{{if $.Data.Form.Has "realms" .Name}} checked{{end}}> {{.Name}}</label>
+    {{- end}}
+    {{template "err" (.Form.Err "realms")}}
+  </fieldset>
+  <div class="buttons"><button>Create client</button></div>
+</form>
+{{else}}<p class="muted">Create a <a href="/realms">realm</a> first; every client is bound to at least one.</p>{{end}}
+{{end}}{{end}}

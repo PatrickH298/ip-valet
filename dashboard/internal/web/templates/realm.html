@@ -1,0 +1,50 @@
+{{define "content"}}{{with .Data}}
+<p class="crumbs"><a href="/realms">Realms</a> /</p>
+<h1>Realm {{.Realm.Name}}</h1>
+<p class="muted">Created {{ts .Realm.CreatedAt}}. <a href="{{query "/entries" "realm" .Realm.Name}}">Entries in this realm</a> · <a href="{{query "/audit" "realm" .Realm.Name}}">Audit log</a></p>
+<p>A submission must pass all four lists, in order. In each list, the first rule whose user and group match decides. Changing a rule enforces it on existing entries; you see which first.</p>
+
+{{range .Lists}}{{$list := .}}{{$n := len .Rules}}
+<section id="{{.Name}}">
+<h2>{{.Title}}</h2>
+<p class="muted">{{.Help}}</p>
+{{if .Rules}}
+<table>
+  <thead><tr>
+    <th>#</th><th>User</th><th>Group</th>
+    {{if eq .Name "ip"}}<th>Prefix</th><th>Action</th>{{end}}
+    {{if eq .Name "prefix"}}<th>Shortest IPv4</th><th>Shortest IPv6</th>{{end}}
+    {{if eq .Name "ttl"}}<th>Longest TTL</th>{{end}}
+    {{if eq .Name "cap"}}<th>Most prefixes</th>{{end}}
+    <th>Description</th><th></th>
+  </tr></thead>
+  <tbody>
+  {{- range $i, $r := .Rules}}
+  <tr>
+    <td>{{.Position}}</td><td>{{sel .User}}</td><td>{{sel .Group}}</td>
+    {{if eq $list.Name "ip"}}<td><code>{{.Prefix}}</code></td><td><span class="badge {{if eq .Action "accept"}}ok{{else}}bad{{end}}">{{.Action}}</span></td>{{end}}
+    {{if eq $list.Name "prefix"}}<td>{{num .MinLenV4 "no limit"}}</td><td>{{num .MinLenV6 "no limit"}}</td>{{end}}
+    {{if eq $list.Name "ttl"}}<td>{{.MaxTTL}}</td>{{end}}
+    {{if eq $list.Name "cap"}}<td>{{num .MaxPrefixes ""}}</td>{{end}}
+    <td>{{str .Description}}</td>
+    <td class="actions">
+      <a href="/realms/{{.Realm}}/rules/{{.List}}/{{.ID}}">Edit</a>
+      {{if gt .Position 1}}<form method="post" action="/realms/{{.Realm}}/rules/{{.List}}/{{.ID}}/move"><input type="hidden" name="position" value="{{add .Position -1}}"><button class="small" title="Move up">↑</button></form>{{end}}
+      {{if lt (add $i 1) $n}}<form method="post" action="/realms/{{.Realm}}/rules/{{.List}}/{{.ID}}/move"><input type="hidden" name="position" value="{{add .Position 1}}"><button class="small" title="Move down">↓</button></form>{{end}}
+      <form method="post" action="/realms/{{.Realm}}/rules/{{.List}}/{{.ID}}/delete"><button class="small danger">Delete</button></form>
+    </td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">{{if eq .Name "cap"}}No cap rules: users may hold any number of prefixes.{{else}}No rules: every submission fails this list.{{end}}</p>{{end}}
+<p><a class="button" href="/realms/{{$.Data.Realm.Name}}/rules/{{.Name}}/new">Add {{single .Name}}</a></p>
+</section>
+{{end}}
+
+<section class="danger-zone">
+<h2>Delete realm</h2>
+<p>Deleting the realm removes its entries from every worker, and deletes its rules, subscriptions and client bindings. You see how many entries first.</p>
+<form method="post" action="/realms/{{.Realm.Name}}/delete"><button class="danger">Delete realm {{.Realm.Name}}…</button></form>
+</section>
+{{end}}{{end}}

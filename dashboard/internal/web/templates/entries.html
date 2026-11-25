@@ -1,0 +1,32 @@
+{{define "content"}}{{with .Data}}
+<h1>Entries</h1>
+<form method="get" action="/entries" class="filters">
+  <label>Realm <select name="realm"><option value="">any</option>{{range .Realms}}<option value="{{.Name}}"{{if eq ($.Data.Filter.Get "realm") .Name}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+  <label>User <input name="user" value="{{.Filter.Get "user"}}" size="12"></label>
+  <label>Group <input name="group" value="{{.Filter.Get "group"}}" size="12"></label>
+  <label>Prefix <input name="prefix" value="{{.Filter.Get "prefix"}}" size="18"></label>
+  <label>State <select name="state"><option value="">any</option>{{range .States}}<option value="{{.}}"{{if eq ($.Data.Filter.Get "state") .}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+  <label>Worker <select name="worker_id"><option value="">any</option>{{range .Workers}}<option value="{{.ID}}"{{if eq ($.Data.Filter.Get "worker_id") .ID}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+  <label>Client <select name="client_id"><option value="">any</option>{{range .Clients}}<option value="{{.ID}}"{{if eq ($.Data.Filter.Get "client_id") .ID}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>
+  <label class="check"><input type="checkbox" name="include_ended"{{if eq (.Filter.Get "include_ended") "on"}} checked{{end}}> Include deleted and expired</label>
+  <button>Filter</button> <a href="/entries">Clear</a>
+</form>
+{{with .Error}}<p class="flash flash-error">{{.}}</p>{{end}}
+{{if .Entries}}
+<table>
+  <thead><tr><th>Prefix</th><th>Realm</th><th>User</th><th>Group</th><th>State</th><th>Expires</th><th>Workers</th></tr></thead>
+  <tbody>
+  {{- range .Entries}}
+  <tr>
+    <td><a href="/entries/{{.ID}}"><code>{{.Prefix}}</code></a></td>
+    <td>{{.Realm}}</td><td>{{.User}}</td><td>{{.Group}}</td>
+    <td>{{template "state" .State}}</td>
+    <td>{{if .ExpiresAt}}<span title="{{ts .ExpiresAt}}">{{ago .ExpiresAt}}</span>{{else}}never{{end}}</td>
+    <td>{{range $i, $w := .Workers}}{{if $i}}, {{end}}{{.Name}}: {{.State}}{{end}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else if not .Error}}<p class="muted">No entries match.</p>{{end}}
+<p class="pager">{{if .Paged}}<a href="/entries">First page</a>{{end}} {{with .Next}}<a href="{{.}}">Next page</a>{{end}}</p>
+{{end}}{{end}}

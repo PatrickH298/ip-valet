@@ -1,0 +1,8 @@
+{{define "content"}}{{with .Data}}
+<h1>Key created</h1>
+<p>A new {{.Key.Kind}} key for {{.Owner}}, named <strong>{{.Key.Name}}</strong>{{if .Key.ExpiresAt}}, expiring {{ts .Key.ExpiresAt}}{{else}}, with no expiry{{end}}.</p>
+<p class="flash flash-warn">Copy the key now. It is shown only this once; ip-valet keeps only its hash.</p>
+<p><label>Key <input class="secret" readonly value="{{.Key.Secret}}" size="80" autocomplete="off" spellcheck="false"></label></p>
+{{template "warnings" .Warnings}}
+<p><a class="button" href="{{.Back}}">Done</a></p>
+{{end}}{{end}}

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<title>{{.Title}} · ip-valet</title>
+<link rel="stylesheet" href="{{.Style}}">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/">ip-valet</a>
+  {{- if .User}}
+  <nav aria-label="Sections">
+    <a href="/"{{if eq .Section "overview"}} aria-current="page"{{end}}>Overview</a>
+    <a href="/realms"{{if eq .Section "realms"}} aria-current="page"{{end}}>Realms</a>
+    <a href="/workers"{{if eq .Section "workers"}} aria-current="page"{{end}}>Workers</a>
+    <a href="/clients"{{if eq .Section "clients"}} aria-current="page"{{end}}>Clients</a>
+    <a href="/keys"{{if eq .Section "keys"}} aria-current="page"{{end}}>Keys</a>
+    <a href="/entries"{{if eq .Section "entries"}} aria-current="page"{{end}}>Entries</a>
+    <a href="/audit"{{if eq .Section "audit"}} aria-current="page"{{end}}>Audit</a>
+  </nav>
+  <div class="who">
+    <span>{{.User.Name}}</span>
+    {{- if .CanSignOut}}
+    <form method="post" action="/logout"><button class="link">Sign out</button></form>
+    {{- end}}
+  </div>
+  {{- end}}
+</header>
+<main>
+{{- with .Flash}}
+<div class="flash flash-{{.Kind}}" role="status">{{range .Lines}}<p>{{.}}</p>{{end}}</div>
+{{- end}}
+{{template "content" .}}
+</main>
+<footer>ip-valet dashboard {{.Version}}</footer>
+</body>
+</html>

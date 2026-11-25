@@ -1,0 +1,33 @@
+{{define "content"}}{{with .Data}}{{$e := .Entry}}
+<p class="crumbs"><a href="/entries">Entries</a> /</p>
+<h1><code>{{$e.Prefix}}</code> for {{$e.User}} {{template "state" $e.State}}</h1>
+<dl class="facts">
+  <dt>Realm</dt><dd><a href="/realms/{{$e.Realm}}">{{$e.Realm}}</a></dd>
+  <dt>User</dt><dd>{{$e.User}}</dd>
+  <dt>Group</dt><dd>{{$e.Group}}</dd>
+  <dt>Expires</dt><dd>{{if $e.ExpiresAt}}{{ts $e.ExpiresAt}} ({{ago $e.ExpiresAt}}){{else}}never{{end}}</dd>
+  <dt>Registered</dt><dd>{{ts $e.CreatedAt}}, last changed {{ts $e.UpdatedAt}}</dd>
+  <dt>Client</dt><dd>{{if $e.ClientID}}<a href="/clients/{{$e.ClientID}}">{{or .ClientName "deleted client"}}</a>{{else}}deleted client{{end}}{{if $e.KeyID}}, key {{or .KeyName "(deleted)"}} <code>{{$e.KeyID}}</code>{{end}}</dd>
+  <dt>Submission</dt><dd><code>{{$e.SubmissionID}}</code></dd>
+  <dt>Revision</dt><dd>{{$e.Revision}}</dd>
+  {{if $e.DeletedAt}}<dt>Deleted</dt><dd>{{ts $e.DeletedAt}} by {{str $e.DeletedBy}}</dd>{{end}}
+</dl>
+<h2>On each worker</h2>
+{{if $e.Workers}}
+<table>
+  <thead><tr><th>Worker</th><th>Label</th><th>State</th><th>Last report</th></tr></thead>
+  <tbody>
+  {{- range $e.Workers}}
+  <tr><td><a href="/workers/{{.ID}}">{{.Name}}</a></td><td>{{.Label}}</td><td>{{template "state" .State}}{{with .Code}} <code>{{.}}</code>{{end}}</td><td>{{ago .LastSeenAt}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No worker matches this entry.</p>{{end}}
+<p><a href="{{query "/audit" "realm" $e.Realm}}">Audit log for the realm</a></p>
+{{if not $e.DeletedAt}}
+<section class="danger-zone">
+<h2>Delete entry</h2>
+<form method="post" action="/entries/{{$e.ID}}/delete"><button class="danger">Delete this entry…</button></form>
+</section>
+{{end}}
+{{end}}{{end}}
