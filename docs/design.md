@@ -52,7 +52,7 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 - A leaked client key can only act inside its realms, and only within the realms' rules.
 - A leaked worker key exposes one worker's address list (prefixes and expiries, never who registered them) and nothing else. It cannot widen its own subscriptions.
 - A compromised API can change desired state for every worker, so each worker keeps its own safety floor (see Worker protocol).
-- Every change is audited with the client, the key id, and the realm, user and group the client asserted.
+- Every change is audited with the client, the key id, and the realm, user and group the client asserted. An admin key may also name the person it acts for (`IPValet-On-Behalf-Of`), such as the user signed in to the admin dashboard; that name is as trustworthy as the key.
 
 **Admin bootstrap.** Two ways to get the first admin key; both can be used together.
 
@@ -89,7 +89,7 @@ All state lives in Postgres. A wildcard is stored as NULL and written `*` in the
 | ip\_rules, ttl\_rules, prefix\_rules, cap\_rules | realm, user or `*`, group or `*`, position, plus the rule's own fields | Four separate ordered lists per realm (see Matching and rules). |
 | worker\_rejections | worker, prefix, code, detail, revision | Replaced on each successful status report from that worker. |
 | entry\_removals | entry, worker, revision | Which workers held an entry when it was deleted, or when they stopped matching it, and the revision each must reach to confirm removing it (see Applied state). |
-| audit\_log | time, actor (key id or `admin:env`), client, action, realm, user, group, prefix, details | Kept 1 year by default. |
+| audit\_log | time, actor (key id or `admin:env`), the person an admin key acted for, client, action, realm, user, group, prefix, details, caller's address | Kept 1 year by default. |
 | revision | one global counter | Bumped by every change that can alter any worker's desired state (see Revisions). |
 
 **Users and groups are realm-scoped.** A user is identified by (realm, user), so `authentik/patrick` and `discord/patrick` are different people. Group names are taken directly from the client's identity source (an authentik group name, for example); no translation layer exists.

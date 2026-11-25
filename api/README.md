@@ -110,7 +110,8 @@ These are on both the public and the admin listener:
   proxy never exposes it.
 
 Logs are JSON on stdout: one access line per request with the method, route
-pattern, status, duration, actor, client address and request id. Keys, the `Authorization`
+pattern, status, duration, actor, the person an admin key acted for
+(`IPValet-On-Behalf-Of`), client address and request id. Keys, the `Authorization`
 header and request bodies are never logged. Every response carries an
 `X-Request-Id` header.
 

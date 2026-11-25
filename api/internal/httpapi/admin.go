@@ -793,6 +793,7 @@ type auditView struct {
 	Prefix     *string         `json:"prefix"`
 	Details    json.RawMessage `json:"details"`
 	ClientIP   *string         `json:"client_ip"`
+	OnBehalfOf *string         `json:"on_behalf_of"`
 }
 
 type idCursor struct {
@@ -800,7 +801,7 @@ type idCursor struct {
 }
 
 func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Principal) error {
-	if err := checkQuery(r, "since", "until", "actor", "realm", "action", "limit", "cursor"); err != nil {
+	if err := checkQuery(r, "since", "until", "actor", "on_behalf_of", "realm", "action", "limit", "cursor"); err != nil {
 		return err
 	}
 	page, err := parsePage(r)
@@ -827,7 +828,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 		where = append(where, "at < "+arg(*until))
 	}
 	q := r.URL.Query()
-	for _, f := range []string{"actor", "realm", "action"} {
+	for _, f := range []string{"actor", "on_behalf_of", "realm", "action"} {
 		if v := q.Get(f); v != "" {
 			where = append(where, f+" = "+arg(v))
 		}
@@ -839,7 +840,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 		where = append(where, "id < "+arg(c.ID))
 	}
 	sql := `SELECT id, at, actor, client_id::text, action, object_type, object_id, realm, username, grp,
-		host(prefix) || '/' || masklen(prefix), details, host(client_ip) FROM audit_log`
+		host(prefix) || '/' || masklen(prefix), details, host(client_ip), on_behalf_of FROM audit_log`
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -854,7 +855,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 			at time.Time
 		)
 		err := row.Scan(&v.ID, &at, &v.Actor, &v.ClientID, &v.Action, &v.ObjectType, &v.ObjectID, &v.Realm,
-			&v.User, &v.Group, &v.Prefix, &v.Details, &v.ClientIP)
+			&v.User, &v.Group, &v.Prefix, &v.Details, &v.ClientIP, &v.OnBehalfOf)
 		v.At = ts(at)
 		return v, err
 	})
