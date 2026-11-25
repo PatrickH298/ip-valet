@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -178,6 +180,19 @@ func (s *Server) handle(pattern, kind string, h handlerFunc) {
 		if info := reqInfoFrom(r.Context()); info != nil {
 			info.actor = p.Actor
 		}
+		if p.Kind == auth.KindAdmin {
+			if v := r.Header.Values(OnBehalfOfHeader); v != nil {
+				name, err := onBehalfOf(v)
+				if err != nil {
+					s.writeErr(w, r, err)
+					return
+				}
+				if info := reqInfoFrom(r.Context()); info != nil {
+					info.onBehalfOf = name
+				}
+				r = r.WithContext(db.WithOnBehalfOf(r.Context(), name))
+			}
+		}
 		if r.ContentLength > s.Config.MaxBodyBytes {
 			s.writeErr(w, r, &http.MaxBytesError{Limit: s.Config.MaxBodyBytes})
 			return
@@ -196,9 +211,40 @@ type ctxKey int
 const reqInfoKey ctxKey = 0
 
 type reqInfo struct {
-	id    string
-	actor string
-	ip    netip.Addr
+	id         string
+	actor      string
+	onBehalfOf string
+	ip         netip.Addr
+}
+
+// OnBehalfOfHeader names the person an admin key acts for, such as the user
+// signed in to the admin dashboard. Audit rows record it as on_behalf_of.
+// Other kinds of key are not asked who they act for; the header is ignored.
+const OnBehalfOfHeader = "IPValet-On-Behalf-Of"
+
+// onBehalfOf validates the header's values: exactly one, 1 to 256
+// characters of UTF-8 with no control characters.
+func onBehalfOf(values []string) (string, error) {
+	bad := func(msg string) error {
+		return &apiError{Status: http.StatusBadRequest, Code: "invalid_request",
+			Message: "IPValet-On-Behalf-Of: " + msg, Fields: map[string]string{"IPValet-On-Behalf-Of": msg}}
+	}
+	if len(values) != 1 {
+		return "", bad("must be given once")
+	}
+	v := values[0]
+	if !utf8.ValidString(v) {
+		return "", bad("must be UTF-8")
+	}
+	if n := utf8.RuneCountInString(v); n < 1 || n > 256 {
+		return "", bad("must be 1 to 256 characters")
+	}
+	for _, c := range v {
+		if unicode.IsControl(c) {
+			return "", bad("must not contain control characters")
+		}
+	}
+	return v, nil
 }
 
 func reqInfoFrom(ctx context.Context) *reqInfo {
@@ -301,8 +347,8 @@ func (s *Server) wrap(mux *http.ServeMux) http.Handler {
 				level = slog.LevelDebug
 			}
 			s.Log.Log(r.Context(), level, "request", "method", r.Method, "route", route, "status", status,
-				"duration_ms", float64(d.Microseconds())/1000, "actor", info.actor, "client_ip", info.ip.String(),
-				"request_id", info.id)
+				"duration_ms", float64(d.Microseconds())/1000, "actor", info.actor, "on_behalf_of", info.onBehalfOf,
+				"client_ip", info.ip.String(), "request_id", info.id)
 		}()
 
 		if _, pattern := mux.Handler(r); pattern == "" {

@@ -5,3 +5,5 @@ Simple IP registration service.
 - [API server implementation spec](docs/api-server-spec.md)
 - [OpenAPI contract](spec/openapi.yaml) for workers and clients
 - [API server](api/README.md): configuration, commands and development
+- [Admin dashboard](dashboard/README.md), and its [design](docs/dashboard.md)
+- [Deployment](deploy/README.md): a hardened Compose setup

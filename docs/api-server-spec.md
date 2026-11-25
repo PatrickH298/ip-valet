@@ -16,7 +16,7 @@ Build the ip-valet API server: one Go binary that owns the Postgres database and
 4. A `Dockerfile` producing a minimal, non-root image.
 5. Tests covering every item in Acceptance tests, runnable with `go test ./...` against a disposable Postgres named by `IPVALET_TEST_DATABASE_URL` (in CI, where `CI` is set, a missing URL fails the tests instead of skipping them).
 6. A `README.md` in `api/` listing the environment variables and commands.
-7. `.github/workflows/ci.yml`: on every pull request, push to `main`, `api/v*` tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) when `api/`, `spec/` or the workflow changed; check DCO sign-offs on pull requests; build the image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-api` from `main` (`main`, `sha-<commit>`) and from tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check. Pull requests from `dependabot[bot]` and `renovate[bot]` skip the DCO check. `.github/dependabot.yml` opens weekly grouped updates for Go modules, the pinned actions and the base images.
+7. `.github/workflows/ci.yml`: on every pull request, push to `main`, release tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) for each component that changed (`api/`, and `dashboard/`, whose tests also run the API server; a change to `spec/` or the workflow checks both); check DCO sign-offs on pull requests; build each image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-<component>` from `main` (`main`, `sha-<commit>`) and from `<component>/vX.Y.Z` tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check. Pull requests from `dependabot[bot]` and `renovate[bot]` skip the DCO check. `.github/dependabot.yml` opens weekly grouped updates for Go modules, the pinned actions and the base images.
 
 **Definition of done**
 
@@ -270,7 +270,9 @@ CREATE TABLE audit_log (
   grp         text,
   prefix      cidr,
   details     jsonb NOT NULL DEFAULT '{}',
-  client_ip   inet             -- the caller's address (migration 00002); NULL for the server and CLI
+  client_ip   inet,            -- the caller's address (migration 00002); NULL for the server and CLI
+  on_behalf_of text CHECK (char_length(on_behalf_of) BETWEEN 1 AND 256)
+                               -- IPValet-On-Behalf-Of of an admin request (migration 00003)
 );
 CREATE INDEX audit_log_at ON audit_log (at);
 ```
@@ -307,6 +309,8 @@ Every 401 spends one attempt from the caller's network budget and is counted in 
 **Failed-authentication throttle.** One token bucket per client network, kept in memory, evicted after 10 minutes without a failure, and capped at 100,000 networks (past that, the network that failed longest ago is forgotten; since failures cost no database work, that gives an attacker nothing of value): `rate.Limit(n/60)` with burst `n`, where `n` is `IPVALET_AUTH_FAILURES_PER_MINUTE`. A network is an IPv4 address or an IPv6 /64. Only failed authentications spend tokens; while the bucket holds less than one token, every request from that network is refused before any key lookup. Log a warning when a network's budget runs out. There are no rate limits on authenticated requests.
 
 **Client address.** The caller is the connection's peer, unless the peer is in `IPVALET_TRUSTED_PROXIES`; then read `X-Forwarded-For` from the right, skip trusted proxies, and take the first other address (IPv4-mapped addresses are unmapped). A malformed hop stops the walk at the last address vouched for. If a request carries `X-Forwarded-For` from an untrusted peer, log one warning, since every client behind that proxy would then share one budget. The address appears in access logs as `client_ip`.
+
+**Acting for a person.** On a request authenticated with an admin key, an `IPValet-On-Behalf-Of` header names the person the key acts for, such as the user signed in to the admin dashboard. It must appear once, as 1 to 256 characters of UTF-8 with no control characters (otherwise 400 `invalid_request`). Audit rows the request writes record it as `on_behalf_of`, and the access log as `on_behalf_of`. Requests with client and worker keys ignore it.
 
 **Response headers.** Every response carries `X-Request-Id` and `X-Content-Type-Options: nosniff`; responses under `/v1` carry `Cache-Control: no-store` (event streams use `no-cache`).
 
@@ -720,7 +724,7 @@ data: {"id":"…","state":"active"}
 | Rules | `GET`, `POST /realms/{realm}/rules/{list}`; `PATCH`, `DELETE /realms/{realm}/rules/{list}/{id}`; `PUT /realms/{realm}/rules/{list}/order` | `list` is `ip`, `prefix`, `ttl` or `cap`. Common fields `{ user, group, position?, description? }`. IP adds `prefix, action`; prefix adds `min_len_v4, min_len_v6` (null = no limit); TTL adds `max_ttl` (a duration or `"unlimited"`); cap adds `max_prefixes`. `order` takes `{ "ids": […] }`, which must list every rule in that list exactly once. All changes go through the impact check. |
 | Entries | `GET /entries`, `GET /entries/{id}`, `DELETE /entries/{id}` | Like the client view, across all realms, plus `client_id`, `key_id`, `revision`, `deleted_by`, and worker `id`, `name` and `last_seen_at`. Extra filters: `client_id`, `worker_id` (entries the worker matches). |
 | Health | `GET /workers/{id}/health`, `GET /health` | Per worker: `applied_revision`, current revision, `lag`, `applied_generated_at`, `last_seen_at`, `last_error`, `last_error_at`, `last_instance`, `last_version`, `worker_streams` (on the answering API instance), rejections. `/health` lists every worker, plus `keys`: active keys expiring within 14 days (`expiring_soon`) or unused for 30 days (`unused`). |
-| Audit | `GET /audit` | Filters `since`, `until`, `actor`, `realm`, `action`; newest first. |
+| Audit | `GET /audit` | Filters `since`, `until`, `actor`, `on_behalf_of`, `realm`, `action`; newest first. |
 
 **The impact check.** It applies to rule changes of any kind, subscription deletion, worker deletion, and worker family changes. No entry is ever left in place that fails a rule.
 
@@ -844,6 +848,7 @@ Each item is at least one automated test against a real Postgres. Unit tests for
 - [x] The throttle forgets the network that failed longest ago once it tracks its maximum.
 - [x] The public listener answers admin routes with 404 and the admin listener serves them; each serves health.
 - [x] Audit rows record the caller's address.
+- [x] Audit rows record the `IPValet-On-Behalf-Of` of an admin request, filterable as `on_behalf_of`; a malformed one is 400 and changes nothing; client keys are not asked for it.
 - [x] Creating an admin key without an expiry returns an `admin_key_without_expiry` warning; `/v1/admin/health` lists keys expiring soon and keys unused for 30 days.
 
 **Normalisation and rules**
@@ -925,6 +930,7 @@ The design doc did not settle these; this spec picked a value so the server coul
 | Admin listener | Separate listener on `:8081` | The admin API is never reachable through the public proxy, whatever the proxy or forwarded-address settings |
 | Readiness | Database check reused for one second | Unauthenticated probes cannot tie up database connections |
 | Audit address | Each audit row records the caller's address | The audit log is the record kept for a year |
+| Acting for a person | An admin key may name the person it acts for in `IPValet-On-Behalf-Of`; audit rows record it | A dashboard holds one admin key for everyone who signs in; the audit log still says who made each change |
 | Event streams per key | 4 per instance; keys re-checked every heartbeat | One key cannot multiply the work every change causes, and revocation reaches open streams |
 | Client event stream | Baseline of entries live or ended in the last 24 h; recheck every 30 s | Catches expiries without a notification |
 | Metrics | Separate listener on `:9090` | Not reachable through the public proxy |

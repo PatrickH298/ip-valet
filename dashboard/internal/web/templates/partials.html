@@ -1,0 +1,53 @@
+{{define "err"}}{{with .}}<span class="err">{{.}}</span>{{end}}{{end}}
+
+{{define "formerror"}}{{if .}}{{with .Error}}<p class="flash flash-error">{{.}}</p>{{end}}{{if .Errors}}{{if not .Error}}<p class="flash flash-error">Check the fields marked below.</p>{{end}}{{end}}{{end}}{{end}}
+
+{{define "state"}}<span class="badge state-{{.}}">{{.}}</span>{{end}}
+
+{{define "impact"}}
+<table>
+  <thead><tr><th>Prefix</th><th>Realm</th><th>User</th><th>Group</th><th>Breaks</th><th>Then</th></tr></thead>
+  <tbody>
+  {{- range .}}
+  <tr>
+    <td><a href="/entries/{{.EntryID}}">{{.Prefix}}</a></td><td>{{.Realm}}</td><td>{{.User}}</td><td>{{.Group}}</td>
+    <td>{{effect .Effect}}</td>
+    <td>{{if eq .Action "remove"}}<span class="badge bad">removed</span>{{else if eq .Action "shorten"}}<span class="badge warn">shortened</span>{{else}}<span class="badge off">stays, unrouted</span>{{end}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{end}}
+
+{{define "warnings"}}{{range .}}<p class="flash flash-warn">Warning: {{.Message}}</p>{{end}}{{end}}
+
+{{define "keys"}}
+{{if .Keys}}
+<table>
+  <thead><tr><th>Name</th><th>Id</th>{{if .ShowOwner}}<th>Belongs to</th>{{end}}<th>Status</th><th>Created</th><th>Expires</th><th>Last used</th><th></th></tr></thead>
+  <tbody>
+  {{- range .Keys}}
+  <tr>
+    <td>{{.Key.Name}}{{if .Self}} <span class="badge info">this dashboard</span>{{end}}</td>
+    <td><code>{{.Key.ID}}</code></td>
+    {{if $.ShowOwner}}<td>{{if .OwnerURL}}<a href="{{.OwnerURL}}">{{.Owner}}</a>{{else}}{{.Owner}}{{end}}</td>{{end}}
+    <td><span class="badge {{.StatusClass}}">{{.Status}}</span></td>
+    <td title="{{ts .Key.CreatedAt}}">{{ago .Key.CreatedAt}}</td>
+    <td>{{if .Key.ExpiresAt}}<span title="{{ts .Key.ExpiresAt}}">{{ago .Key.ExpiresAt}}</span>{{else}}never{{end}}</td>
+    <td>{{if .Key.LastUsedAt}}<span title="{{ts .Key.LastUsedAt}}">{{ago .Key.LastUsedAt}}</span>{{else}}never{{end}}</td>
+    <td class="actions">{{if not .Key.RevokedAt}}<form method="post" action="/keys/{{.Key.ID}}/revoke"><input type="hidden" name="back" value="{{$.Back}}"><button class="small danger">Revoke</button></form>{{end}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No keys yet.</p>{{end}}
+{{end}}
+
+{{define "keyform"}}
+<form method="post" action="{{.Action}}" class="inline-form">
+  {{template "formerror" .Form}}
+  <label>Name <input name="name" value="{{.Form.Get "name"}}" required maxlength="128">{{template "err" (.Form.Err "name")}}</label>
+  <label>Expires in days <input name="expires_in_days" value="{{.Form.Get "expires_in_days"}}" inputmode="numeric" placeholder="never" size="6">{{template "err" (.Form.Err "expires_in_days")}}{{template "err" (.Form.Err "expires_at")}}</label>
+  <button>Create key</button>
+</form>
+{{end}}

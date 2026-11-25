@@ -1,0 +1,22 @@
+{{define "content"}}{{with .Data}}
+<h1>Realms</h1>
+<p class="muted">A realm is a namespace of users and groups with its own rules. Clients act within the realms they are bound to.</p>
+{{if .Realms}}
+<table>
+  <thead><tr><th>Realm</th><th>Created</th></tr></thead>
+  <tbody>
+  {{- range .Realms}}
+  <tr><td><a href="/realms/{{.Name}}">{{.Name}}</a></td><td title="{{ts .CreatedAt}}">{{ago .CreatedAt}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No realms yet.</p>{{end}}
+
+<h2>New realm</h2>
+<form method="post" action="/realms" class="inline-form">
+  {{template "formerror" .Form}}
+  <label>Name <input name="name" value="{{.Form.Get "name"}}" required pattern="[a-z0-9][a-z0-9._-]{0,62}" title="lowercase letters, digits, dot, underscore and hyphen">{{template "err" (.Form.Err "name")}}</label>
+  <button>Create realm</button>
+</form>
+<p class="muted">A new realm gets default rules: deny reserved ranges, accept everything else, the default shortest prefixes and longest TTL.</p>
+{{end}}{{end}}

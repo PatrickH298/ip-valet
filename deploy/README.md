@@ -1,13 +1,15 @@
 # Deploying ip-valet
 
-[`compose.example.yaml`](compose.example.yaml) runs the API server and its
-Postgres database behind your existing reverse proxy, which terminates TLS.
+[`compose.example.yaml`](compose.example.yaml) runs the API server, its
+Postgres database and the admin dashboard behind your existing reverse proxy,
+which terminates TLS.
 
 | Port | Serves | Who should reach it |
 | --- | --- | --- |
 | 8080 | Client and worker API, `/healthz`, `/readyz` | Your reverse proxy only |
 | 8081 | Admin API (`/v1/admin/*`), `/healthz`, `/readyz` | This host, or your LAN or VPN; never the internet |
 | 9090 | Prometheus `/metrics` | Your monitoring, over an internal network |
+| 8090 | Admin dashboard | This host, or your proxy over HTTPS for the people who manage ip-valet |
 
 ## Setup
 
@@ -51,10 +53,10 @@ Postgres database behind your existing reverse proxy, which terminates TLS.
 4. **Connect the proxy network.** The compose file joins an external network
    named `proxy`. Create it, or rename it to the one your proxy already uses.
 
-5. **Start it:**
+5. **Start the API** (Compose starts the database with it):
 
    ```bash
-   docker compose -f compose.example.yaml up -d
+   docker compose -f compose.example.yaml up -d api
    ```
 
    On first start, `postgres-init/10-ipvalet.sh` creates the `ipvalet` role,
@@ -67,7 +69,37 @@ Postgres database behind your existing reverse proxy, which terminates TLS.
    docker compose -f compose.example.yaml exec api ipvalet-api create-admin-key --name bootstrap --expires 90d
    ```
 
-7. **Route the public hostname** in your proxy to `api:8080`. Do not route
+7. **Set up the dashboard.** Give it its own admin key, with an expiry, then
+   start it:
+
+   ```bash
+   docker compose -f compose.example.yaml exec -T api ipvalet-api create-admin-key --name dashboard --expires 365d > secrets/dashboard_api_key
+   ```
+
+   ```bash
+   sudo chown 65532 secrets/dashboard_api_key && sudo chmod 0400 secrets/dashboard_api_key
+   ```
+
+   ```bash
+   docker compose -f compose.example.yaml up -d dashboard
+   ```
+
+   It listens on `127.0.0.1:8090`. From another machine, use an SSH tunnel
+   (`ssh -L 8090:127.0.0.1:8090 <host>`, then open <http://localhost:8090>).
+
+   **Sign in with user name `admin` and password `admin`**, then choose a new
+   password on the Account page that opens; the dashboard cannot be used until
+   you do. The login is kept in the `dashboard-data` volume. To use the
+   dashboard from elsewhere, route a hostname to `dashboard:8090` in your proxy
+   over HTTPS, after changing the default login.
+
+   Lost the password? Reset the login to `admin` / `admin` and sign in again:
+
+   ```bash
+   docker compose -f compose.example.yaml exec dashboard ipvalet-dashboard reset-login && docker compose -f compose.example.yaml restart dashboard
+   ```
+
+8. **Route the public hostname** in your proxy to `api:8080`. Do not route
    8081 or 9090.
 
 ## Security notes
@@ -87,6 +119,12 @@ Postgres database behind your existing reverse proxy, which terminates TLS.
 - **Environment admin key.** If you bootstrap with an environment key, prefer
   `IPVALET_ADMIN_KEY_HASH`, so this host never holds the key, or
   `IPVALET_ADMIN_KEY_FILE` over plain `IPVALET_ADMIN_KEY`.
+- **Dashboard.** It holds an admin key and gives full admin access to whoever
+  signs in. Change the default `admin` / `admin` login before exposing it, expose
+  it only over HTTPS, and revoke the dashboard's key if the host is
+  compromised. Failed sign-ins are
+  throttled per network, as the API throttles failed keys; authentik or
+  another forward-auth layer in front of it adds a second gate.
 - **Backups.** Back up the `db-data` volume or run `pg_dump` regularly.
   Workers remove expired addresses on their own, so an outage never leaves
   expired access open, but the database holds every entry and key.

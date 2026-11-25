@@ -1,0 +1,58 @@
+{{define "content"}}{{with .Data}}
+<h1>Overview</h1>
+<div class="cards">
+  <div class="card">
+    <h2>API server</h2>
+    {{if .Ready}}<p><span class="badge ok">ready</span></p>{{else}}<p><span class="badge bad">not ready</span></p><p class="muted">{{.ReadyError}}</p>{{end}}
+    {{with .Health}}<p>Revision <strong>{{.Revision}}</strong></p>{{end}}
+  </div>
+  {{with .Health}}
+  <div class="card">
+    <h2>Workers</h2>
+    <p><strong>{{len .Workers}}</strong> {{if eq (len .Workers) 1}}worker{{else}}workers{{end}}{{if $.Data.Attention}}, <span class="badge warn">{{$.Data.Attention}} need a look</span>{{else if .Workers}}, all up to date{{end}}</p>
+  </div>
+  <div class="card">
+    <h2>Keys</h2>
+    <p>{{if or .Keys.ExpiringSoon .Keys.Unused}}{{len .Keys.ExpiringSoon}} expiring within 14 days, {{len .Keys.Unused}} unused for 30 days{{else}}Nothing needs attention.{{end}}</p>
+  </div>
+  {{end}}
+</div>
+{{with .HealthErr}}<p class="flash flash-error">{{.}}</p>{{end}}
+{{with .Health}}
+<h2>Workers</h2>
+{{if $.Data.Workers}}
+<table>
+  <thead><tr><th>Worker</th><th>Label</th><th>Status</th><th>Applied</th><th>Last report</th><th>Last error</th><th>Streams</th></tr></thead>
+  <tbody>
+  {{- range $.Data.Workers}}
+  <tr>
+    <td><a href="/workers/{{.Health.WorkerID}}">{{.Health.Name}}</a></td>
+    <td>{{.Health.Label}}</td>
+    <td><span class="badge {{.StatusClass}}">{{.Status}}</span></td>
+    <td>{{.Health.AppliedRevision}} of {{.Health.Revision}}</td>
+    <td>{{if .Health.LastSeenAt}}<span title="{{ts .Health.LastSeenAt}}">{{ago .Health.LastSeenAt}}</span>{{with .Health.LastInstance}} from {{.}}{{end}}{{else}}never{{end}}</td>
+    <td>{{if .Health.LastError}}<span title="{{ts .Health.LastErrorAt}}">{{ago .Health.LastErrorAt}}:</span> {{str .Health.LastError}}{{else}}<span class="muted">none</span>{{end}}</td>
+    <td>{{.Health.WorkerStreams}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No workers yet. <a href="/workers">Add one.</a></p>{{end}}
+
+{{if or .Keys.ExpiringSoon .Keys.Unused}}
+<h2>Keys that need attention</h2>
+<table>
+  <thead><tr><th>Key</th><th>Kind</th><th>Why</th><th>Created</th><th>Last used</th></tr></thead>
+  <tbody>
+  {{- range .Keys.ExpiringSoon}}
+  <tr><td>{{.Name}} <code>{{.ID}}</code>{{if eq .ID $.Data.SelfKeyID}} <span class="badge info">this dashboard</span>{{end}}</td><td>{{.Kind}}</td><td><span class="badge warn">expires {{ago .ExpiresAt}}</span></td><td>{{ago .CreatedAt}}</td><td>{{ago .LastUsedAt}}</td></tr>
+  {{- end}}
+  {{- range .Keys.Unused}}
+  <tr><td>{{.Name}} <code>{{.ID}}</code></td><td>{{.Kind}}</td><td><span class="badge off">unused for 30 days</span></td><td>{{ago .CreatedAt}}</td><td>{{ago .LastUsedAt}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+<p><a href="/keys">Manage keys</a></p>
+{{end}}
+{{end}}
+{{end}}{{end}}

@@ -1,0 +1,94 @@
+{{define "content"}}{{with .Data}}
+<p class="crumbs"><a href="/workers">Workers</a> /</p>
+<h1>Worker {{.Worker.Name}} <span class="badge {{.StatusClass}}">{{.Status}}</span></h1>
+<p class="muted">Label shown to clients: {{.Worker.Label}}. <a href="{{query "/entries" "worker_id" .Worker.ID}}">Entries routed to it</a></p>
+
+<div class="cards">
+  <div class="card">
+    <h2>Applied</h2>
+    <p>Revision <strong>{{.Health.AppliedRevision}}</strong> of {{.Health.Revision}}{{if gt .Health.Lag 0}}, <span class="badge warn">{{.Health.Lag}} behind</span>{{end}}</p>
+    <p class="muted">Desired state from {{ts .Health.AppliedGeneratedAt}}</p>
+  </div>
+  <div class="card">
+    <h2>Last report</h2>
+    <p>{{if .Health.LastSeenAt}}<span title="{{ts .Health.LastSeenAt}}">{{ago .Health.LastSeenAt}}</span>{{else}}Never{{end}}</p>
+    <p class="muted">{{with .Health.LastInstance}}From {{.}}{{end}}{{with .Health.LastVersion}}, version {{.}}{{end}}. {{.Health.WorkerStreams}} open event {{if eq .Health.WorkerStreams 1}}stream{{else}}streams{{end}}.</p>
+  </div>
+  <div class="card">
+    <h2>Last error</h2>
+    {{if .Health.LastError}}<p>{{str .Health.LastError}}</p><p class="muted">{{ts .Health.LastErrorAt}}</p>{{else}}<p class="muted">None reported.</p>{{end}}
+  </div>
+</div>
+
+{{if .Health.Rejections}}
+<h2>Rejections</h2>
+<p class="muted">Prefixes the worker refused to apply, from its last report.</p>
+<table>
+  <thead><tr><th>Prefix</th><th>Code</th><th>Detail</th><th>Revision</th></tr></thead>
+  <tbody>
+  {{- range .Health.Rejections}}
+  <tr><td><code>{{.Prefix}}</code></td><td>{{.Code}}</td><td>{{str .Detail}}</td><td>{{.Revision}}</td></tr>
+  {{- end}}
+  </tbody>
+</table>
+{{end}}
+
+<section id="subscriptions">
+<h2>Subscriptions</h2>
+<p class="muted">An entry is routed to this worker when its family is one the worker applies and a subscription matches its realm, user and group.</p>
+{{if .Subs}}
+<table>
+  <thead><tr><th>Realm</th><th>User</th><th>Group</th><th>Created</th><th></th></tr></thead>
+  <tbody>
+  {{- range .Subs}}
+  <tr>
+    <td>{{sel .Realm}}</td><td>{{sel .User}}</td><td>{{sel .Group}}</td><td title="{{ts .CreatedAt}}">{{ago .CreatedAt}}</td>
+    <td class="actions"><form method="post" action="/workers/{{$.Data.Worker.ID}}/subscriptions/{{.ID}}/delete"><button class="small danger">Delete</button></form></td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else}}<p class="muted">No subscriptions: nothing is routed to this worker.</p>{{end}}
+<form method="post" action="/workers/{{.Worker.ID}}/subscriptions" class="inline-form">
+  {{template "formerror" .SubForm}}
+  <label>Realm <select name="realm">
+    <option value="*"{{if eq (.SubForm.Get "realm") "*"}} selected{{end}}>any realm</option>
+    {{- range .Realms}}<option value="{{.Name}}"{{if eq ($.Data.SubForm.Get "realm") .Name}} selected{{end}}>{{.Name}}</option>{{end}}
+  </select>{{template "err" (.SubForm.Err "realm")}}</label>
+  <label>User <input name="user" value="{{.SubForm.Get "user"}}" required size="14">{{template "err" (.SubForm.Err "user")}}</label>
+  <label>Group <input name="group" value="{{.SubForm.Get "group"}}" required size="14">{{template "err" (.SubForm.Err "group")}}</label>
+  <button>Subscribe</button>
+</form>
+<p class="muted">* in user or group matches any.</p>
+</section>
+
+<section id="keys">
+<h2>Keys</h2>
+<p class="muted">The worker program authenticates with one of these. Keep more than one during a rotation.</p>
+{{template "keys" (dict "Keys" .Keys "ShowOwner" false "Back" (printf "/workers/%s#keys" .Worker.ID))}}
+{{template "keyform" (dict "Action" (printf "/workers/%s/keys" .Worker.ID) "Form" .KeyForm)}}
+</section>
+
+<section>
+<h2>Settings</h2>
+<form method="post" action="/workers/{{.Worker.ID}}" class="stack">
+  {{template "formerror" .Edit}}
+  <div class="row">
+    <label>Name <input name="name" value="{{.Edit.Get "name"}}" required maxlength="128">{{template "err" (.Edit.Err "name")}}</label>
+    <label>Label <input name="label" value="{{.Edit.Get "label"}}" required maxlength="256">{{template "err" (.Edit.Err "label")}}</label>
+  </div>
+  <fieldset><legend>Address families it applies</legend>
+    <label class="check"><input type="checkbox" name="ipv4"{{if .Edit.Checked "ipv4"}} checked{{end}}> IPv4</label>
+    <label class="check"><input type="checkbox" name="ipv6"{{if .Edit.Checked "ipv6"}} checked{{end}}> IPv6</label>
+    {{template "err" (.Edit.Err "ipv4")}}{{template "err" (.Edit.Err "ipv6")}}
+  </fieldset>
+  <div class="buttons"><button>Save worker</button></div>
+</form>
+</section>
+
+<section class="danger-zone">
+<h2>Delete worker</h2>
+<p>Deletes its subscriptions, rejections and keys. You see which entries it held first.</p>
+<form method="post" action="/workers/{{.Worker.ID}}/delete"><button class="danger">Delete worker {{.Worker.Name}}…</button></form>
+</section>
+{{end}}{{end}}

@@ -1,0 +1,16 @@
+{{define "content"}}{{with .Data}}
+<h1>Keys</h1>
+<p class="tabs">
+  <a href="/keys"{{if eq .Kind ""}} aria-current="page"{{end}}>All</a>
+  <a href="/keys?kind=admin"{{if eq .Kind "admin"}} aria-current="page"{{end}}>Admin</a>
+  <a href="/keys?kind=client"{{if eq .Kind "client"}} aria-current="page"{{end}}>Client</a>
+  <a href="/keys?kind=worker"{{if eq .Kind "worker"}} aria-current="page"{{end}}>Worker</a>
+</p>
+{{template "keys" (dict "Keys" .Keys "ShowOwner" true "Back" (query "/keys" "kind" .Kind))}}
+<p class="pager">{{if .Paged}}<a href="{{query "/keys" "kind" .Kind}}">First page</a>{{end}} {{with .Next}}<a href="{{.}}">Next page</a>{{end}}</p>
+<p class="muted">Create client and worker keys on the client's or worker's page. The admin key given to the API server at startup is not listed.</p>
+
+<h2>New admin key</h2>
+<p class="muted">An admin key can do everything. Give each person or program its own, with an expiry.</p>
+{{template "keyform" (dict "Action" "/keys" "Form" .Form)}}
+{{end}}{{end}}

@@ -359,7 +359,16 @@ func WithClientIP(ctx context.Context, ip netip.Addr) context.Context {
 	return context.WithValue(ctx, clientIPKey{}, ip)
 }
 
-// InsertAudit writes an audit row, with the caller's address from ctx if any.
+type onBehalfOfKey struct{}
+
+// WithOnBehalfOf records the person an admin key acts for in ctx;
+// InsertAudit stores it.
+func WithOnBehalfOf(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, onBehalfOfKey{}, name)
+}
+
+// InsertAudit writes an audit row, with the caller's address and the person
+// an admin key acted for from ctx, if any.
 func InsertAudit(ctx context.Context, q Querier, a Audit) error {
 	details := a.Details
 	if details == nil {
@@ -377,10 +386,15 @@ func InsertAudit(ctx context.Context, q Querier, a Audit) error {
 	if v, ok := ctx.Value(clientIPKey{}).(netip.Addr); ok && v.IsValid() {
 		ip = &v
 	}
+	var onBehalfOf *string
+	if v, ok := ctx.Value(onBehalfOfKey{}).(string); ok && v != "" {
+		onBehalfOf = &v
+	}
 	_, err = q.Exec(ctx, `
-		INSERT INTO audit_log (actor, client_id, action, object_type, object_id, realm, username, grp, prefix, details, client_ip)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		a.Actor, a.ClientID, a.Action, a.ObjectType, objID, a.Realm, a.User, a.Group, a.Prefix, js, ip)
+		INSERT INTO audit_log (actor, client_id, action, object_type, object_id, realm, username, grp, prefix, details,
+			client_ip, on_behalf_of)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+		a.Actor, a.ClientID, a.Action, a.ObjectType, objID, a.Realm, a.User, a.Group, a.Prefix, js, ip, onBehalfOf)
 	return err
 }
 

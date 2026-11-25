@@ -1,0 +1,33 @@
+{{define "content"}}{{with .Data}}
+<p class="crumbs"><a href="/clients">Clients</a> /</p>
+<h1>Client {{.Client.Name}}</h1>
+<p class="muted">Realms: {{if .Client.Realms}}{{join .Client.Realms ", "}}{{else}}none (every call is refused){{end}}. <a href="{{query "/entries" "client_id" .Client.ID}}">Entries it registered</a></p>
+
+<section id="keys">
+<h2>Keys</h2>
+<p class="muted">The client program authenticates with one of these.</p>
+{{template "keys" (dict "Keys" .Keys "ShowOwner" false "Back" (printf "/clients/%s#keys" .Client.ID))}}
+{{template "keyform" (dict "Action" (printf "/clients/%s/keys" .Client.ID) "Form" .KeyForm)}}
+</section>
+
+<section>
+<h2>Settings</h2>
+<form method="post" action="/clients/{{.Client.ID}}" class="stack">
+  {{template "formerror" .Edit}}
+  <label>Name <input name="name" value="{{.Edit.Get "name"}}" required maxlength="128">{{template "err" (.Edit.Err "name")}}</label>
+  <fieldset><legend>Realms it may act in</legend>
+    {{- range .Realms}}
+    <label class="check"><input type="checkbox" name="realms" value="{{.Name}}"{{if $.Data.Edit.Has "realms" .Name}} checked{{end}}> {{.Name}}</label>
+    {{- end}}
+    {{template "err" (.Edit.Err "realms")}}
+  </fieldset>
+  <div class="buttons"><button>Save client</button></div>
+</form>
+</section>
+
+<section class="danger-zone">
+<h2>Delete client</h2>
+<p>Deletes its keys. The entries it registered stay.</p>
+<form method="post" action="/clients/{{.Client.ID}}/delete"><button class="danger">Delete client {{.Client.Name}}…</button></form>
+</section>
+{{end}}{{end}}

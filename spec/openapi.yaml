@@ -47,6 +47,11 @@ info:
     `X-Request-Id` and `X-Content-Type-Options: nosniff`; responses under
     `/v1` carry `Cache-Control: no-store` (event streams: `no-cache`).
 
+    **Acting for a person.** An admin key may name the person it acts for
+    in `IPValet-On-Behalf-Of` (1 to 256 characters), for example a dashboard
+    that holds one admin key for everyone who signs in to it. Audit rows
+    record the name as `on_behalf_of`, next to the key as `actor`.
+
     **Lists** take `limit` (default 100, max 1000) and an opaque `cursor`, and
     return `{ "items": [...], "next_cursor": "..." | null }`.
 
@@ -535,6 +540,8 @@ paths:
         `0.0.0.0/0` and `::/0`; one prefix rule with the configured default
         lengths; one TTL rule with the configured default TTL; no cap rules.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -603,6 +610,8 @@ paths:
         the affected workers. Needs no confirmation. A client left with no realm gets 403
         `realm_not_allowed` on every call.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       responses:
         "200":
           description: What was removed.
@@ -666,6 +675,7 @@ paths:
         the end. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       requestBody:
@@ -709,6 +719,7 @@ paths:
       description: "`ids` must list every rule in the list exactly once. Goes through the impact check."
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       requestBody:
@@ -759,6 +770,7 @@ paths:
       description: Fields present replace the stored ones; `position` moves the rule. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       requestBody:
@@ -790,6 +802,7 @@ paths:
       description: Later rules move up one position. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       responses:
@@ -844,6 +857,8 @@ paths:
       operationId: createClient
       summary: Create a client
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -895,6 +910,8 @@ paths:
       summary: Change a client
       description: Fields present replace the stored ones. `realms` replaces the client's realm bindings.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -923,6 +940,8 @@ paths:
       summary: Delete a client
       description: Deletes the client's keys; its entries remain with `client_id` null.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       responses:
         "200":
           description: The deleted client.
@@ -974,6 +993,8 @@ paths:
       operationId: createWorker
       summary: Create a worker
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -1029,6 +1050,7 @@ paths:
         label changes do neither.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       requestBody:
@@ -1068,6 +1090,7 @@ paths:
       description: Deletes its subscriptions, rejections and worker keys. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       responses:
@@ -1129,6 +1152,8 @@ paths:
         A realm `*` with a specific user or group returns a
         `cross_realm_selector` warning.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -1162,6 +1187,7 @@ paths:
       description: Bumps the revision and the worker's `subscriptions_revision`. Goes through the impact check.
       security: [{ adminKey: [] }]
       parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
         - $ref: "#/components/parameters/DryRun"
         - $ref: "#/components/parameters/Confirm"
       responses:
@@ -1288,6 +1314,8 @@ paths:
       summary: Create a key
       description: The response holds the full key in `key`. It is shown only this once.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       requestBody:
         required: true
         content:
@@ -1351,6 +1379,8 @@ paths:
       summary: Revoke a key
       description: Takes effect on the key's next request. Revoking a revoked key keeps the first `revoked_at`.
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       responses:
         "200":
           description: The key record.
@@ -1443,6 +1473,8 @@ paths:
       operationId: deleteAdminEntry
       summary: Delete one entry, any realm
       security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
       responses:
         "200":
           description: The entry, usually in state `removing`.
@@ -1477,6 +1509,10 @@ paths:
         - name: actor
           in: query
           description: A key id, `admin:env` or `system`.
+          schema: { type: string }
+        - name: on_behalf_of
+          in: query
+          description: The person an admin key acted for.
           schema: { type: string }
         - name: realm
           in: query
@@ -1570,6 +1606,15 @@ components:
       name: limit
       in: query
       schema: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+    OnBehalfOf:
+      name: IPValet-On-Behalf-Of
+      in: header
+      description: |
+        The person this admin key acts for, such as the user signed in to an
+        admin dashboard; recorded as `on_behalf_of` in the change's audit
+        rows. As trustworthy as the key that sends it. Requests with other
+        kinds of key ignore it.
+      schema: { type: string, minLength: 1, maxLength: 256 }
     Cursor:
       name: cursor
       in: query
@@ -2476,7 +2521,8 @@ components:
         last_used_at: { $ref: "#/components/schemas/NullableTimestamp" }
     AuditEntry:
       type: object
-      required: [id, at, actor, client_id, action, object_type, object_id, realm, user, group, prefix, details, client_ip]
+      required: [id, at, actor, client_id, action, object_type, object_id, realm, user, group, prefix, details, client_ip,
+        on_behalf_of]
       properties:
         id: { type: integer, format: int64 }
         at: { $ref: "#/components/schemas/Timestamp" }
@@ -2495,3 +2541,6 @@ components:
         client_ip:
           type: [string, "null"]
           description: The address of the request that made the change; null for the server itself and the command line.
+        on_behalf_of:
+          type: [string, "null"]
+          description: The person an admin key acted for (`IPValet-On-Behalf-Of`); null when none was named.

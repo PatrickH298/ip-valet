@@ -1,0 +1,23 @@
+{{define "content"}}{{with .Data}}
+<h1>Account</h1>
+{{if .Default}}
+<p class="flash flash-warn">You are signed in with the default login (admin / admin). Choose a new password to start using the dashboard.</p>
+{{end}}
+<p class="muted">The dashboard has one login. Changes made through it are recorded in the audit log under its user name.</p>
+<form method="post" action="/account" class="stack">
+  {{template "formerror" .Form}}
+  <label>User name <input name="username" value="{{.Form.Get "username"}}" required maxlength="256" autocomplete="username">{{template "err" (.Form.Err "username")}}</label>
+  <div class="row">
+    <label>New password <input type="password" name="new_password" autocomplete="new-password"{{if .Default}} required{{end}} minlength="{{.MinLength}}"> <small>at least {{.MinLength}} characters{{if not .Default}}; leave empty to keep the current one{{end}}</small>{{template "err" (.Form.Err "new_password")}}</label>
+    <label>Repeat it <input type="password" name="confirm" autocomplete="new-password">{{template "err" (.Form.Err "confirm")}}</label>
+  </div>
+  <fieldset><legend>Sign-in method</legend>
+    <label class="check"><input type="radio" name="method" value="form"{{if eq (.Form.Get "method") "form"}} checked{{end}}> Sign-in page, with a session cookie</label>
+    <label class="check"><input type="radio" name="method" value="basic"{{if eq (.Form.Get "method") "basic"}} checked{{end}}> HTTP basic auth (the browser asks; there is no sign-out)</label>
+    {{template "err" (.Form.Err "method")}}
+  </fieldset>
+  <label>Current password <input type="password" name="current" required autocomplete="current-password">{{template "err" (.Form.Err "current")}}</label>
+  <div class="buttons"><button>Save login</button></div>
+</form>
+<p class="muted">Saving signs out every other session. If you lose the password, run <code>ipvalet-dashboard reset-login</code> where the dashboard runs and restart it; the login is then admin / admin again.</p>
+{{end}}{{end}}

@@ -1,0 +1,32 @@
+{{define "content"}}{{with .Data}}
+<h1>Audit log</h1>
+<form method="get" action="/audit" class="filters">
+  <label>From <input type="date" name="since" value="{{.Filter.Get "since"}}"></label>
+  <label>To <input type="date" name="until" value="{{.Filter.Get "until"}}"></label>
+  <label>Person <input name="on_behalf_of" value="{{.Filter.Get "on_behalf_of"}}" size="12"></label>
+  <label>Key <input name="actor" value="{{.Filter.Get "actor"}}" size="18" placeholder="key id, admin:env, system"></label>
+  <label>Realm <input name="realm" value="{{.Filter.Get "realm"}}" size="12"></label>
+  <label>Action <input name="action" value="{{.Filter.Get "action"}}" size="14" placeholder="rule.update"></label>
+  <button>Filter</button> <a href="/audit">Clear</a>
+</form>
+{{with .Error}}<p class="flash flash-error">{{.}}</p>{{end}}
+{{if .Rows}}
+<table class="audit">
+  <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Object</th><th>Realm, user, group, prefix</th><th>From</th><th>Details</th></tr></thead>
+  <tbody>
+  {{- range .Rows}}{{$a := .Entry}}
+  <tr>
+    <td title="{{ts $a.At}}">{{ts $a.At}}</td>
+    <td>{{with $a.OnBehalfOf}}<strong>{{.}}</strong> via {{end}}{{if .ActorName}}{{.ActorName}} <code>{{$a.Actor}}</code>{{else}}<code>{{$a.Actor}}</code>{{end}}</td>
+    <td>{{$a.Action}}</td>
+    <td>{{$a.ObjectType}}{{with $a.ObjectID}} <code title="{{.}}">{{short .}}</code>{{end}}{{with .ObjectURL}} <a href="{{.}}">open</a>{{end}}</td>
+    <td>{{str $a.Realm}}{{with $a.User}} · {{.}}{{end}}{{with $a.Group}} · {{.}}{{end}}{{with $a.Prefix}} · <code>{{.}}</code>{{end}}</td>
+    <td>{{str $a.ClientIP}}</td>
+    <td>{{with .Details}}<details><summary>show</summary><pre>{{.}}</pre></details>{{end}}</td>
+  </tr>
+  {{- end}}
+  </tbody>
+</table>
+{{else if not .Error}}<p class="muted">No audit rows match.</p>{{end}}
+<p class="pager">{{if .Paged}}<a href="/audit">First page</a>{{end}} {{with .Next}}<a href="{{.}}">Next page</a>{{end}}</p>
+{{end}}{{end}}

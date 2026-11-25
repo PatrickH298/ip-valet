@@ -1,10 +1,10 @@
-# Weekly update pull requests for the API's Go modules, the pinned GitHub
-# Actions and the image's base images. Interim: to be replaced by Renovate.
+# Weekly update pull requests for the Go modules of the API server and the
+# dashboard, the pinned GitHub Actions and the images' base images. Interim: to be replaced by Renovate.
 # Known vulnerabilities are caught independently by govulncheck in CI.
 version: 2
 updates:
   - package-ecosystem: gomod
-    directory: /api
+    directories: [/api, /dashboard]
     schedule:
       interval: weekly
     groups:
@@ -20,7 +20,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directory: /api
+    directories: [/api, /dashboard]
     schedule:
       interval: weekly
     groups:

@@ -1,0 +1,19 @@
+{{define "content"}}{{with .Data}}
+<h1>{{.Heading}}</h1>
+<p>{{.Message}}</p>
+{{range .Notes}}<p class="flash flash-warn">{{.}}</p>{{end}}
+{{if .Impact}}
+<h2>{{plural (len .Impact) "entry is" "entries are"}} affected</h2>
+<p>No entry is left in place that breaks a rule, so confirming does this to each of them:</p>
+{{template "impact" .Impact}}
+{{else if .Preview}}
+<p class="muted">No existing entries are affected.</p>
+{{end}}
+{{template "warnings" .Warnings}}
+<form method="post" action="{{.Action}}" class="buttons">
+  {{range .Fields}}<input type="hidden" name="{{index . 0}}" value="{{index . 1}}">{{end}}
+  <input type="hidden" name="confirm" value="yes">
+  <button{{if .Danger}} class="danger"{{end}}>{{.Button}}</button>
+  <a href="{{.Cancel}}">Cancel</a>
+</form>
+{{end}}{{end}}

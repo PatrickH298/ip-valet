@@ -1,0 +1,42 @@
+{{define "content"}}{{with .Data}}
+<p class="crumbs"><a href="/realms">Realms</a> / <a href="/realms/{{.Realm}}">{{.Realm}}</a> /</p>
+<h1>{{if .Rule}}{{title (single .List)}} {{.Rule.Position}}{{else}}New {{single .List}}{{end}}</h1>
+<p class="muted">{{.Help}}</p>
+<form method="post" action="{{.Action}}" class="stack">
+  {{template "formerror" .Form}}
+  <div class="row">
+    <label>User <input name="user" value="{{.Form.Get "user"}}" required maxlength="256"> <small>* for any</small>{{template "err" (.Form.Err "user")}}</label>
+    <label>Group <input name="group" value="{{.Form.Get "group"}}" required maxlength="256"> <small>* for any</small>{{template "err" (.Form.Err "group")}}</label>
+  </div>
+  {{if eq .List "ip"}}
+  <div class="row">
+    <label>Prefix <input name="prefix" value="{{.Form.Get "prefix"}}" required placeholder="203.0.113.0/24"> {{template "err" (.Form.Err "prefix")}}</label>
+    <label>Action <select name="action">
+      <option value="accept"{{if eq (.Form.Get "action") "accept"}} selected{{end}}>accept</option>
+      <option value="deny"{{if eq (.Form.Get "action") "deny"}} selected{{end}}>deny</option>
+    </select>{{template "err" (.Form.Err "action")}}</label>
+  </div>
+  {{end}}
+  {{if eq .List "prefix"}}
+  <div class="row">
+    <label>Shortest IPv4 prefix <input name="min_len_v4" value="{{.Form.Get "min_len_v4"}}" inputmode="numeric" placeholder="no limit" size="6"> <small>0 to 32</small>{{template "err" (.Form.Err "min_len_v4")}}</label>
+    <label>Shortest IPv6 prefix <input name="min_len_v6" value="{{.Form.Get "min_len_v6"}}" inputmode="numeric" placeholder="no limit" size="6"> <small>0 to 128</small>{{template "err" (.Form.Err "min_len_v6")}}</label>
+  </div>
+  {{end}}
+  {{if eq .List "ttl"}}
+  <label>Longest TTL <input name="max_ttl" value="{{.Form.Get "max_ttl"}}" required placeholder="30d" size="12"> <small>for example 3600s, 90m, 36h, 30d or unlimited</small>{{template "err" (.Form.Err "max_ttl")}}</label>
+  {{end}}
+  {{if eq .List "cap"}}
+  <label>Most prefixes per user <input name="max_prefixes" value="{{.Form.Get "max_prefixes"}}" required inputmode="numeric" size="6">{{template "err" (.Form.Err "max_prefixes")}}</label>
+  {{end}}
+  {{if not .Rule}}
+  <label>Position <input name="position" value="{{.Form.Get "position"}}" inputmode="numeric" size="6" placeholder="auto"> <small>empty: before the first catch-all rule, or at the end</small>{{template "err" (.Form.Err "position")}}</label>
+  {{end}}
+  <label>Description <input name="description" value="{{.Form.Get "description"}}" maxlength="1000" class="wide">{{template "err" (.Form.Err "description")}}</label>
+  <div class="buttons">
+    <button>{{if .Rule}}Save rule{{else}}Add rule{{end}}</button>
+    <a href="/realms/{{.Realm}}#{{.List}}">Cancel</a>
+  </div>
+</form>
+<p class="muted">If existing entries break the {{if .Rule}}changed{{else}}new{{end}} rule, you see them and confirm before anything is saved.</p>
+{{end}}{{end}}

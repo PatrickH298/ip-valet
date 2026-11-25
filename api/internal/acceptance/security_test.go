@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -82,6 +83,44 @@ func TestAuditRecordsClientAddress(t *testing.T) {
 	items := h.Admin(200, "GET", "/v1/admin/audit?action=realm.create", nil)["items"].([]any)
 	if len(items) != 1 || items[0].(map[string]any)["client_ip"] != "198.51.100.20" {
 		t.Fatalf("audit = %v", items)
+	}
+}
+
+func TestAuditRecordsOnBehalfOf(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	r := h.Do("POST", "/v1/admin/realms", h.AdminKey, map[string]any{"name": "r"}, "IPValet-On-Behalf-Of", "Zoë Admin")
+	if r.Status != 201 {
+		t.Fatalf("create realm: %d %s", r.Status, r.Body)
+	}
+	h.Admin(201, "POST", "/v1/admin/realms", map[string]any{"name": "s"})
+	items := h.Admin(200, "GET", "/v1/admin/audit?action=realm.create", nil)["items"].([]any)
+	got := map[string]any{}
+	for _, it := range items {
+		m := it.(map[string]any)
+		got[m["object_id"].(string)] = m["on_behalf_of"]
+	}
+	if got["r"] != "Zoë Admin" || got["s"] != nil {
+		t.Fatalf("on_behalf_of by realm = %v", got)
+	}
+	filtered := h.Admin(200, "GET", "/v1/admin/audit?on_behalf_of=Zo%C3%AB+Admin", nil)["items"].([]any)
+	if len(filtered) != 1 || filtered[0].(map[string]any)["object_id"] != "r" {
+		t.Fatalf("filtered audit = %v", filtered)
+	}
+
+	// Malformed names are refused before anything changes.
+	for _, v := range []string{"", strings.Repeat("x", 257), "a\tb"} {
+		r := h.Do("POST", "/v1/admin/realms", h.AdminKey, map[string]any{"name": "t"}, "IPValet-On-Behalf-Of", v)
+		if r.Status != 400 || r.Code(t) != "invalid_request" {
+			t.Errorf("on behalf of %q: %d %s", v, r.Status, r.Body)
+		}
+	}
+	h.Must(404, "GET", "/v1/admin/realms/t", h.AdminKey, nil)
+
+	// Other kinds of key are not asked who they act for: the header is ignored.
+	s := h.Basic("u")
+	if r := h.Do("GET", "/v1/entries", s.ClientKey, nil, "IPValet-On-Behalf-Of", ""); r.Status != 200 {
+		t.Fatalf("client key with the header: %d %s", r.Status, r.Body)
 	}
 }
 

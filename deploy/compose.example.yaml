@@ -1,13 +1,13 @@
-# Example deployment: the ip-valet API and its Postgres. Copy it, read
-# deploy/README.md, fill in the secrets and the proxy settings, then
-# `docker compose up -d`. Your reverse proxy (Traefik, Caddy, nginx...)
-# terminates TLS and forwards to api:8080 only.
+# Example deployment: the ip-valet API, its Postgres and the admin dashboard.
+# Copy it, read deploy/README.md, fill in the secrets and the proxy settings,
+# then `docker compose up -d`. Your reverse proxy (Traefik, Caddy, nginx...)
+# terminates TLS and forwards the public hostname to api:8080 only.
 
 name: ip-valet
 
 services:
   api:
-    image: ghcr.io/patrickh298/ip-valet-api:main # pin a release tag once one exists
+    image: ghcr.io/patrickh298/ip-valet-api:0.1.0
     restart: unless-stopped
     depends_on:
       db:
@@ -33,6 +33,32 @@ services:
       # Admin API on this host only. To reach it from your LAN or VPN, bind
       # to that interface's address instead; never publish it to the internet.
       - "127.0.0.1:8081:8081"
+    networks: [proxy, internal]
+
+  dashboard:
+    image: ghcr.io/patrickh298/ip-valet-dashboard:main # pin a release tag once one exists
+    restart: unless-stopped
+    depends_on: [api]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      IPVALET_DASHBOARD_API_URL: http://api:8081 # the admin listener
+      IPVALET_DASHBOARD_API_KEY_FILE: /run/secrets/dashboard_api_key
+      # Secure cookies need HTTPS, or http://localhost (an SSH tunnel). Set
+      # false only to use plain HTTP across your LAN.
+      IPVALET_DASHBOARD_SECURE_COOKIES: "true"
+      IPVALET_DASHBOARD_TRUSTED_PROXIES: ${IPVALET_TRUSTED_PROXIES:?set to your reverse proxy's address or subnet}
+      IPVALET_DASHBOARD_TIMEZONE: UTC
+    secrets: [dashboard_api_key]
+    volumes:
+      # The login (first boot: admin / admin, changed on first sign-in).
+      # The rest of the filesystem stays read-only.
+      - dashboard-data:/data
+    ports:
+      # On this host only, like the admin API. Route a hostname to
+      # dashboard:8090 in your proxy (over HTTPS) to use it from elsewhere.
+      - "127.0.0.1:8090:8090"
     networks: [proxy, internal]
 
   db:
@@ -70,6 +96,9 @@ secrets:
     file: ./secrets/postgres_password
   ipvalet_db_password:
     file: ./secrets/ipvalet_db_password
+  dashboard_api_key:
+    file: ./secrets/dashboard_api_key
 
 volumes:
   db-data:
+  dashboard-data:
