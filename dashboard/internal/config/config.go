@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 )
 
 // Config is the validated dashboard configuration.
@@ -23,10 +25,10 @@ type Config struct {
 	APIKey     string   // the admin key the dashboard uses
 	APITimeout time.Duration
 
-	DataDir       string // holds the local login
-	SecureCookies bool
-	SessionIdle   time.Duration
-	SessionMax    time.Duration
+	DataDir     string          // holds the local login
+	Cookies     auth.CookieMode // IPVALET_DASHBOARD_SECURE_COOKIES
+	SessionIdle time.Duration
+	SessionMax  time.Duration
 
 	LoginFailuresPerMinute int            // per client network; 0 = off
 	TrustedProxies         []netip.Prefix // peers whose X-Forwarded-For is believed
@@ -108,14 +110,6 @@ func (l *loader) intRange(name, def string, lo, hi int) int {
 	return n
 }
 
-func (l *loader) boolean(name, def string) bool {
-	b, err := strconv.ParseBool(strings.TrimSpace(l.raw(name, def)))
-	if err != nil {
-		l.fail(name, "must be true or false")
-	}
-	return b
-}
-
 // Load builds a Config from getenv, reading _FILE variants with read.
 func Load(getenv Getenv, read ReadFile) (Config, error) {
 	l := &loader{get: getenv, read: read}
@@ -160,7 +154,12 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 	if c.DataDir == "" {
 		l.fail("IPVALET_DASHBOARD_DATA_DIR", "must not be empty")
 	}
-	c.SecureCookies = l.boolean("IPVALET_DASHBOARD_SECURE_COOKIES", "true")
+	switch v := auth.CookieMode(strings.ToLower(strings.TrimSpace(l.raw("IPVALET_DASHBOARD_SECURE_COOKIES", "auto")))); v {
+	case auth.CookiesAuto, auth.CookiesSecure, auth.CookiesPlain:
+		c.Cookies = v
+	default:
+		l.fail("IPVALET_DASHBOARD_SECURE_COOKIES", "must be auto, true or false")
+	}
 	c.SessionIdle = l.positiveDuration("IPVALET_DASHBOARD_SESSION_IDLE", "30m")
 	c.SessionMax = l.positiveDuration("IPVALET_DASHBOARD_SESSION_MAX", "12h")
 	if c.SessionIdle > c.SessionMax && c.SessionMax > 0 {
@@ -168,16 +167,10 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 	}
 
 	c.LoginFailuresPerMinute = l.intRange("IPVALET_DASHBOARD_LOGIN_FAILURES_PER_MINUTE", "10", 0, 100000)
-	for _, f := range strings.Split(l.raw("IPVALET_DASHBOARD_TRUSTED_PROXIES", ""), ",") {
-		if f = strings.TrimSpace(f); f == "" {
-			continue
-		}
-		p, err := ParseNet(f)
-		if err != nil {
-			l.fail("IPVALET_DASHBOARD_TRUSTED_PROXIES", "%q is not an IP address or CIDR prefix", f)
-			continue
-		}
-		c.TrustedProxies = append(c.TrustedProxies, p)
+	if tp, err := ParseTrustedProxies(l.raw("IPVALET_DASHBOARD_TRUSTED_PROXIES", "")); err != nil {
+		l.fail("IPVALET_DASHBOARD_TRUSTED_PROXIES", "%v", err)
+	} else {
+		c.TrustedProxies = tp
 	}
 
 	loc, err := time.LoadLocation(l.raw("IPVALET_DASHBOARD_TIMEZONE", "UTC"))
@@ -211,6 +204,34 @@ func DataDir(getenv Getenv) string {
 		return v
 	}
 	return "/data"
+}
+
+// AllNetworks trusts every peer.
+var AllNetworks = []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0"), netip.MustParsePrefix("::/0")}
+
+// ParseTrustedProxies reads a trusted-proxy setting: unset, empty or "*"
+// trusts every peer's X-Forwarded-For (the default); "none" trusts none, so
+// the connection's peer is always the client; otherwise a comma-separated
+// list of IP addresses and CIDR prefixes.
+func ParseTrustedProxies(s string) ([]netip.Prefix, error) {
+	switch s = strings.TrimSpace(s); strings.ToLower(s) {
+	case "", "*":
+		return AllNetworks, nil
+	case "none":
+		return nil, nil
+	}
+	var out []netip.Prefix
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f == "" {
+			continue
+		}
+		p, err := ParseNet(f)
+		if err != nil {
+			return nil, fmt.Errorf("%q is not an IP address or CIDR prefix (or use * or none)", f)
+		}
+		out = append(out, p)
+	}
+	return out, nil
 }
 
 // ParseNet parses an IP address (as a single-address prefix) or a CIDR prefix.

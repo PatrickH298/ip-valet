@@ -136,10 +136,6 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*Dashboard
 	d := &Dashboard{Throttle: auth.NewThrottle(cfg.LoginFailuresPerMinute),
 		Sessions: auth.NewSessions(cfg.SessionIdle, cfg.SessionMax), log: log}
 
-	if !cfg.SecureCookies {
-		log.Warn("IPVALET_DASHBOARD_SECURE_COOKIES is false: serve the dashboard over HTTPS anyway, " +
-			"or passwords and session cookies cross the network in the clear")
-	}
 	if cfg.APIURL.Scheme == "http" && !privateHost(cfg.APIURL.Hostname()) {
 		log.Warn("IPVALET_DASHBOARD_API_URL uses plain HTTP to a host that does not look private; " +
 			"the admin key crosses the network in the clear")
@@ -160,11 +156,11 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*Dashboard
 	}
 
 	w, err := web.New(web.Options{API: client, Log: log, Location: cfg.Location, TrustedProxies: cfg.TrustedProxies,
-		SecureCookies: cfg.SecureCookies, SelfKeyID: keyID(cfg.APIKey), Version: Version})
+		Cookies: cfg.Cookies, SelfKeyID: keyID(cfg.APIKey), Version: Version})
 	if err != nil {
 		return nil, err
 	}
-	local := &auth.Local{Store: store, Sessions: d.Sessions, Throttle: d.Throttle, Secure: cfg.SecureCookies,
+	local := &auth.Local{Store: store, Sessions: d.Sessions, Throttle: d.Throttle, Cookies: cfg.Cookies,
 		Log: log, Render: w.LoginRenderer()}
 	w.Auth, w.Local = local, local
 	d.Handler = w.Handler()

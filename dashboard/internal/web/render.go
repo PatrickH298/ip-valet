@@ -152,7 +152,7 @@ func (s *Server) redirect(w http.ResponseWriter, r *http.Request, target string,
 		}
 		val := base64.RawURLEncoding.EncodeToString(b) + "." + s.sign(b)
 		http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: val, Path: "/", HttpOnly: true,
-			Secure: s.SecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 60})
+			Secure: s.Cookies.Secure(r), SameSite: http.SameSiteLaxMode, MaxAge: 60})
 	}
 	http.Redirect(w, r, auth.SafeNext(target), http.StatusSeeOther)
 }
@@ -163,7 +163,7 @@ func (s *Server) takeFlash(w http.ResponseWriter, r *http.Request) *flash {
 		return nil
 	}
 	http.SetCookie(w, &http.Cookie{Name: flashCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
-		Secure: s.SecureCookies, SameSite: http.SameSiteLaxMode})
+		Secure: s.Cookies.Secure(r), SameSite: http.SameSiteLaxMode})
 	body, sig, ok := strings.Cut(c.Value, ".")
 	if !ok {
 		return nil

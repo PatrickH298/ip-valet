@@ -55,7 +55,7 @@ type Local struct {
 	Store    *Store
 	Sessions *Sessions
 	Throttle *Throttle
-	Secure   bool // Secure cookie with the __Host- prefix; needs HTTPS
+	Cookies  CookieMode // when the session cookie is Secure (with the __Host- prefix)
 	Log      *slog.Logger
 	Render   LoginRenderer
 
@@ -77,12 +77,14 @@ func (l *Local) init() {
 	})
 }
 
-// CookieName is the session cookie's name.
-func (l *Local) CookieName() string {
-	if l.Secure {
-		return "__Host-ipvalet-session"
+// sessionCookie returns the session cookie r carries, of either name.
+func sessionCookie(r *http.Request) *http.Cookie {
+	for _, name := range []string{secureSessionCookie, plainSessionCookie} {
+		if c, err := r.Cookie(name); err == nil && c.Value != "" {
+			return c
+		}
 	}
-	return "ipvalet-session"
+	return nil
 }
 
 // check reports whether name and password are the login's. It always costs
@@ -108,8 +110,8 @@ func (l *Local) Identify(r *http.Request) *Identity {
 	if lg.Method == MethodBasic {
 		return l.identifyBasic(r, lg.Username)
 	}
-	c, err := r.Cookie(l.CookieName())
-	if err != nil || c.Value == "" {
+	c := sessionCookie(r)
+	if c == nil {
 		return nil
 	}
 	name, ok := l.Sessions.Get(c.Value)
@@ -209,9 +211,9 @@ func (l *Local) login(w http.ResponseWriter, r *http.Request) {
 	}
 	name, password := r.PostForm.Get("name"), r.PostForm.Get("password")
 	v := LoginView{Name: name, Next: SafeNext(r.PostForm.Get("next")), Default: l.Store.IsDefault()}
-	if l.Secure && plainHTTPOrigin(r) {
+	if l.Cookies == CookiesSecure && plainHTTPOrigin(r) {
 		v.Error = "This page was loaded over plain HTTP, so your browser would not keep the sign-in cookie. " +
-			"Open the dashboard over HTTPS (or http://localhost), or set IPVALET_DASHBOARD_SECURE_COOKIES=false."
+			"Open the dashboard over HTTPS (or http://localhost), or set IPVALET_DASHBOARD_SECURE_COOKIES to auto or false."
 		l.Render(w, r, http.StatusBadRequest, v)
 		return
 	}
@@ -230,32 +232,38 @@ func (l *Local) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A new id at every sign-in, so a cookie planted beforehand is worthless.
-	if old, err := r.Cookie(l.CookieName()); err == nil {
+	if old := sessionCookie(r); old != nil {
 		l.Sessions.Delete(old.Value)
 	}
-	l.startSession(w, name)
+	l.startSession(w, r, name)
 	l.Log.Info("signed in", "user", name, "client_ip", ip.String())
 	http.Redirect(w, r, v.Next, http.StatusSeeOther)
 }
 
-func (l *Local) startSession(w http.ResponseWriter, name string) {
-	http.SetCookie(w, &http.Cookie{Name: l.CookieName(), Value: l.Sessions.Create(name), Path: "/", HttpOnly: true,
-		Secure: l.Secure, SameSite: http.SameSiteLaxMode})
+func (l *Local) startSession(w http.ResponseWriter, r *http.Request, name string) {
+	secure := l.Cookies.Secure(r)
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName(secure), Value: l.Sessions.Create(name), Path: "/",
+		HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 }
 
-func (l *Local) clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: l.CookieName(), Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
-		Secure: l.Secure, SameSite: http.SameSiteLaxMode})
+// clearCookie removes the session cookie, under either name.
+func (l *Local) clearCookie(w http.ResponseWriter, r *http.Request) {
+	for _, c := range r.Cookies() {
+		if c.Name == secureSessionCookie || c.Name == plainSessionCookie {
+			http.SetCookie(w, &http.Cookie{Name: c.Name, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
+				Secure: c.Name == secureSessionCookie, SameSite: http.SameSiteLaxMode})
+		}
+	}
 }
 
 func (l *Local) logout(w http.ResponseWriter, r *http.Request) {
-	if c, err := r.Cookie(l.CookieName()); err == nil {
+	if c := sessionCookie(r); c != nil {
 		if name, ok := l.Sessions.Get(c.Value); ok {
 			l.Log.Info("signed out", "user", name, "client_ip", ClientIPFrom(r.Context()).String())
 		}
 		l.Sessions.Delete(c.Value)
 	}
-	l.clearCookie(w)
+	l.clearCookie(w, r)
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 
@@ -325,9 +333,10 @@ func (l *Local) ChangeLogin(w http.ResponseWriter, r *http.Request, c Change) er
 	clear(l.cache)
 	l.mu.Unlock()
 	if next.Method == MethodForm {
-		l.startSession(w, next.Username)
+		l.clearCookie(w, r)
+		l.startSession(w, r, next.Username)
 	} else {
-		l.clearCookie(w)
+		l.clearCookie(w, r)
 	}
 	l.Log.Info("login changed", "user", next.Username, "previous_user", cur.Username, "method", next.Method,
 		"password_changed", c.NewPassword != "", "client_ip", ip.String())
