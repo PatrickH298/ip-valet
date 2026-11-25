@@ -17,14 +17,16 @@ import (
 
 // Config is the validated server configuration.
 type Config struct {
-	DatabaseURL string
-	DBMaxConns  int32
-	ListenAddr  string
-	MetricsAddr string
+	DatabaseURL     string
+	DBMaxConns      int32
+	ListenAddr      string
+	AdminListenAddr string // "" = admin routes on ListenAddr
+	MetricsAddr     string
 
 	// Environment admin key: only its id and hash are held.
-	AdminKeyID   string
-	AdminKeyHash []byte
+	AdminKeyID     string
+	AdminKeyHash   []byte
+	AdminKeySource string // "", "env" (IPVALET_ADMIN_KEY), "file" or "hash"
 
 	DefaultTTL      time.Duration
 	DefaultPrefixV4 int
@@ -138,6 +140,10 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 		l.fail("IPVALET_LISTEN_ADDR", "must not be empty")
 	}
 	c.MetricsAddr = l.raw("IPVALET_METRICS_ADDR", ":9090")
+	c.AdminListenAddr = l.raw("IPVALET_ADMIN_LISTEN_ADDR", ":8081")
+	if c.AdminListenAddr != "" && c.AdminListenAddr == c.ListenAddr {
+		l.fail("IPVALET_ADMIN_LISTEN_ADDR", "must differ from IPVALET_LISTEN_ADDR; set it empty to serve admin routes there")
+	}
 
 	adminKey, haveKey := l.secret("IPVALET_ADMIN_KEY")
 	adminHash, haveHash := l.get("IPVALET_ADMIN_KEY_HASH")
@@ -150,6 +156,10 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 			l.fail("IPVALET_ADMIN_KEY", "%v", err)
 		} else {
 			c.AdminKeyID, c.AdminKeyHash = k.ID, k.Hash()
+			c.AdminKeySource = "env"
+			if _, viaFile := l.get("IPVALET_ADMIN_KEY_FILE"); viaFile {
+				c.AdminKeySource = "file"
+			}
 		}
 	case haveHash:
 		id, h, err := auth.ParseHashLine(strings.TrimSpace(adminHash))
@@ -157,6 +167,7 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 			l.fail("IPVALET_ADMIN_KEY_HASH", "%v", err)
 		} else {
 			c.AdminKeyID, c.AdminKeyHash = id, h
+			c.AdminKeySource = "hash"
 		}
 	}
 

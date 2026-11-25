@@ -53,14 +53,16 @@ func New(pool *pgxpool.Pool, streams StreamCounter, log *slog.Logger) *Metrics {
 }
 
 var (
-	descRevision    = prometheus.NewDesc("ipvalet_revision", "Current global revision.", nil, nil)
-	descApplied     = prometheus.NewDesc("ipvalet_worker_applied_revision", "Revision the worker last reported applying.", []string{"worker"}, nil)
-	descLag         = prometheus.NewDesc("ipvalet_worker_revision_lag", "Current revision minus the worker's applied revision.", []string{"worker"}, nil)
-	descLastSeen    = prometheus.NewDesc("ipvalet_worker_last_seen_timestamp_seconds", "Unix time of the worker's last status report.", []string{"worker"}, nil)
-	descRejections  = prometheus.NewDesc("ipvalet_worker_rejections", "Prefixes the worker reported rejecting.", []string{"worker"}, nil)
-	descWorkers     = prometheus.NewDesc("ipvalet_worker_streams", "Worker event streams connected to this instance.", []string{"worker"}, nil)
-	descClients     = prometheus.NewDesc("ipvalet_client_streams", "Client event streams connected to this instance.", nil, nil)
-	descEntriesLive = prometheus.NewDesc("ipvalet_entries_live", "Live, unexpired entries per realm.", []string{"realm"}, nil)
+	descRevision     = prometheus.NewDesc("ipvalet_revision", "Current global revision.", nil, nil)
+	descApplied      = prometheus.NewDesc("ipvalet_worker_applied_revision", "Revision the worker last reported applying.", []string{"worker"}, nil)
+	descLag          = prometheus.NewDesc("ipvalet_worker_revision_lag", "Current revision minus the worker's applied revision.", []string{"worker"}, nil)
+	descLastSeen     = prometheus.NewDesc("ipvalet_worker_last_seen_timestamp_seconds", "Unix time of the worker's last status report.", []string{"worker"}, nil)
+	descRejections   = prometheus.NewDesc("ipvalet_worker_rejections", "Prefixes the worker reported rejecting.", []string{"worker"}, nil)
+	descWorkers      = prometheus.NewDesc("ipvalet_worker_streams", "Worker event streams connected to this instance.", []string{"worker"}, nil)
+	descClients      = prometheus.NewDesc("ipvalet_client_streams", "Client event streams connected to this instance.", nil, nil)
+	descKeysExpiring = prometheus.NewDesc("ipvalet_keys_expiring_soon", "Active keys that expire within 14 days.", []string{"kind"}, nil)
+	descKeysUnused   = prometheus.NewDesc("ipvalet_keys_unused", "Active keys not used for 30 days (or never used and older than that).", []string{"kind"}, nil)
+	descEntriesLive  = prometheus.NewDesc("ipvalet_entries_live", "Live, unexpired entries per realm.", []string{"realm"}, nil)
 )
 
 type dbCollector struct {
@@ -71,7 +73,7 @@ type dbCollector struct {
 
 func (c *dbCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{descRevision, descApplied, descLag, descLastSeen, descRejections,
-		descWorkers, descClients, descEntriesLive} {
+		descWorkers, descClients, descEntriesLive, descKeysExpiring, descKeysUnused} {
 		ch <- d
 	}
 }
@@ -115,6 +117,32 @@ func (c *dbCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		ch <- prometheus.MustNewConstMetric(descRejections, prometheus.GaugeValue, float64(nRej), name)
 		ch <- prometheus.MustNewConstMetric(descWorkers, prometheus.GaugeValue, float64(workers[id]), name)
+	}
+	rows.Close()
+
+	rows, err = c.pool.Query(ctx, `
+		SELECT k.kind,
+		       count(*) FILTER (WHERE expires_at IS NOT NULL AND expires_at <= now() + interval '14 days'),
+		       count(*) FILTER (WHERE coalesce(last_used_at, created_at) < now() - interval '30 days')
+		FROM (VALUES ('admin'), ('client'), ('worker')) AS k(kind)
+		LEFT JOIN api_keys a ON a.kind = k.kind AND a.revoked_at IS NULL
+		     AND (a.expires_at IS NULL OR a.expires_at > now())
+		GROUP BY k.kind ORDER BY k.kind`)
+	if err != nil {
+		c.log.Warn("metrics: reading keys failed", "error", err.Error())
+		return
+	}
+	for rows.Next() {
+		var (
+			kind           string
+			expiring, idle int64
+		)
+		if err := rows.Scan(&kind, &expiring, &idle); err != nil {
+			rows.Close()
+			return
+		}
+		ch <- prometheus.MustNewConstMetric(descKeysExpiring, prometheus.GaugeValue, float64(expiring), kind)
+		ch <- prometheus.MustNewConstMetric(descKeysUnused, prometheus.GaugeValue, float64(idle), kind)
 	}
 	rows.Close()
 

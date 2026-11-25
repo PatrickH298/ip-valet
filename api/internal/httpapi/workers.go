@@ -511,6 +511,64 @@ type workerHealthView struct {
 type healthResponse struct {
 	Revision int64              `json:"revision"`
 	Workers  []workerHealthView `json:"workers"`
+	Keys     *keyHealthView     `json:"keys,omitempty"`
+}
+
+// Thresholds for flagging keys in health and metrics.
+const (
+	KeysExpiringWithin = "14 days" // active keys expiring this soon
+	KeysUnusedFor      = "30 days" // active keys not used (or never used) for this long
+)
+
+type keySummary struct {
+	ID         string  `json:"id"`
+	Kind       string  `json:"kind"`
+	Name       string  `json:"name"`
+	CreatedAt  string  `json:"created_at"`
+	ExpiresAt  *string `json:"expires_at"`
+	LastUsedAt *string `json:"last_used_at"`
+}
+
+// keyHealthView lists active keys that need attention: about to expire (an
+// unattended worker or client would stop working) or unused for a long time
+// (likely forgotten, and worth revoking).
+type keyHealthView struct {
+	ExpiringSoon []keySummary `json:"expiring_soon"`
+	Unused       []keySummary `json:"unused"`
+}
+
+func loadKeyHealth(ctx context.Context, q db.Querier) (*keyHealthView, error) {
+	rows, err := q.Query(ctx, `
+		SELECT id, kind, name, created_at, expires_at, last_used_at,
+		       expires_at IS NOT NULL AND expires_at <= now() + $1::interval,
+		       coalesce(last_used_at, created_at) < now() - $2::interval
+		FROM api_keys
+		WHERE revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
+		ORDER BY created_at, id`, KeysExpiringWithin, KeysUnusedFor)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := &keyHealthView{ExpiringSoon: []keySummary{}, Unused: []keySummary{}}
+	for rows.Next() {
+		var (
+			k              keySummary
+			created        time.Time
+			expires, used  *time.Time
+			expiring, idle bool
+		)
+		if err := rows.Scan(&k.ID, &k.Kind, &k.Name, &created, &expires, &used, &expiring, &idle); err != nil {
+			return nil, err
+		}
+		k.CreatedAt, k.ExpiresAt, k.LastUsedAt = ts(created), tsPtr(expires), tsPtr(used)
+		if expiring {
+			out.ExpiringSoon = append(out.ExpiringSoon, k)
+		}
+		if idle {
+			out.Unused = append(out.Unused, k)
+		}
+	}
+	return out, rows.Err()
 }
 
 func (s *Server) loadHealth(ctx context.Context, workerID string) (*healthResponse, error) {
@@ -520,6 +578,11 @@ func (s *Server) loadHealth(ctx context.Context, workerID string) (*healthRespon
 		var err error
 		if out.Revision, err = db.CurrentRevision(ctx, tx); err != nil {
 			return err
+		}
+		if workerID == "" {
+			if out.Keys, err = loadKeyHealth(ctx, tx); err != nil {
+				return err
+			}
 		}
 		sql := `SELECT id::text, name, label, applied_revision, applied_generated_at, last_seen_at, last_error,
 			last_error_at, last_instance, last_version FROM workers`

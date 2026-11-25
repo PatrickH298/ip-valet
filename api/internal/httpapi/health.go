@@ -13,19 +13,40 @@ func (s *Server) healthz(w http.ResponseWriter, _ *http.Request) error {
 	return nil
 }
 
-func (s *Server) readyz(w http.ResponseWriter, r *http.Request) error {
-	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+// readyFor is how long a readiness result is reused. /readyz needs no
+// authentication, so without this every probe would take a database
+// connection; with it, at most one check runs per second however many
+// requests arrive.
+const readyFor = time.Second
+
+// readiness returns "" when ready, or what is wrong. Concurrent callers wait
+// for the one check in flight instead of starting their own.
+func (s *Server) readiness() string {
+	s.readyMu.Lock()
+	defer s.readyMu.Unlock()
+	if !s.readyAt.IsZero() && time.Since(s.readyAt) < readyFor {
+		return s.readyErr
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	s.readyErr = ""
 	var one int
 	if err := s.Pool.QueryRow(ctx, `SELECT 1`).Scan(&one); err != nil {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, "database unreachable\n")
-		return nil
+		s.readyErr = "database unreachable"
 	}
-	if s.Listener != nil && !s.Listener.Up() {
+	s.readyAt = time.Now()
+	return s.readyErr
+}
+
+func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) error {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	problem := s.readiness()
+	if problem == "" && s.Listener != nil && !s.Listener.Up() {
+		problem = "LISTEN connection down"
+	}
+	if problem != "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, "LISTEN connection down\n")
+		_, _ = io.WriteString(w, problem+"\n")
 		return nil
 	}
 	_, _ = io.WriteString(w, "ok\n")

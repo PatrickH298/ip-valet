@@ -24,6 +24,7 @@ import (
 const (
 	ChannelChanges = "ipvalet_changes"
 	ChannelStatus  = "ipvalet_status"
+	ChannelKeys    = "ipvalet_keys" // payload: the id of a key just created
 )
 
 // Advisory lock ids. The migration lock is goose's session lock; the purge

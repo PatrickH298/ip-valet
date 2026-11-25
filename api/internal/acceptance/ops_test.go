@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PatrickH298/ip-valet/api/internal/app"
+	"github.com/PatrickH298/ip-valet/api/internal/auth"
 	"github.com/PatrickH298/ip-valet/api/internal/db"
 	"github.com/PatrickH298/ip-valet/api/internal/jobs"
 	"github.com/PatrickH298/ip-valet/api/internal/testutil"
@@ -118,6 +119,12 @@ func TestReadyz(t *testing.T) {
 	dbURL := testutil.NewDatabase(t)
 	inst := testutil.StartInstance(t, testutil.Config(t, dbURL, nil))
 	c := httpClient()
+	key, _ := auth.NewKey()
+	if _, err := pgxPool(t, dbURL).Exec(context.Background(), `INSERT INTO api_keys (id, kind, name, secret_hash)
+		VALUES ($1, 'admin', 'k', $2)`, key.ID, key.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	inst.App.Auth.RememberKey(key.ID, key.Hash())
 	get := func(path string) int {
 		resp, err := c.Get(inst.URL + path)
 		if err != nil {
@@ -149,9 +156,14 @@ func TestReadyz(t *testing.T) {
 	if s := get("/healthz"); s != 200 {
 		t.Fatalf("healthz with the database gone: %d", s)
 	}
-	// Authenticated routes report 503 unavailable.
+	// A bad key is refused from memory, without the database.
 	r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/entries", "ipv_aaaaaaaaaaaaaaaa_"+
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
+	if r.Status != 401 {
+		t.Fatalf("bad key with the database gone: %d %s", r.Status, r.Body)
+	}
+	// A real key needs the database for its status: 503 unavailable.
+	r = testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil)
 	if r.Status != 503 || r.Code(t) != "unavailable" {
 		t.Fatalf("API with the database gone: %d %s", r.Status, r.Body)
 	}

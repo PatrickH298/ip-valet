@@ -634,9 +634,12 @@ func InsertKey(ctx context.Context, q db.Querier, kind string, clientID, workerI
 	if err != nil {
 		return auth.Key{}, err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO api_keys (id, kind, client_id, worker_id, name, secret_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`, key.ID, kind, clientID, workerID, name, key.Hash(), expiresAt)
-	return key, err
+	if _, err = q.Exec(ctx, `INSERT INTO api_keys (id, kind, client_id, worker_id, name, secret_hash, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`, key.ID, kind, clientID, workerID, name, key.Hash(), expiresAt); err != nil {
+		return auth.Key{}, err
+	}
+	// Every instance adds the key to its in-memory index when this commits.
+	return key, db.Notify(ctx, q, db.ChannelKeys, key.ID)
 }
 
 func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
@@ -700,9 +703,13 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 		return err
 	}
 	ctx := r.Context()
-	var out createdKeyView
+	var (
+		out     createdKeyView
+		created auth.Key
+	)
 	err := db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
 		key, err := InsertKey(ctx, tx, kind, req.ClientID, req.WorkerID, *req.Name, expires)
+		created = key
 		if db.IsForeignKeyViolation(err) {
 			if kind == auth.KindClient {
 				return invalid("client_id", "unknown client")
@@ -724,8 +731,18 @@ func (s *Server) createKey(w http.ResponseWriter, r *http.Request, p *auth.Princ
 	if err != nil {
 		return err
 	}
-	return respondMutation(w, http.StatusCreated, out, nil)
+	// Usable here at once; other instances learn of it through NOTIFY.
+	s.Auth.RememberKey(created.ID, created.Hash())
+	var warn []rules.Warning
+	if kind == auth.KindAdmin && expires == nil {
+		warn = append(warn, rules.Warning{Code: WarnAdminKeyNoExpiry,
+			Message: "admin keys control everything; give them an expiry (expires_at) and replace them before it passes"})
+	}
+	return respondMutation(w, http.StatusCreated, out, warn)
 }
+
+// WarnAdminKeyNoExpiry warns that an admin key was created without an expiry.
+const WarnAdminKeyNoExpiry = "admin_key_without_expiry"
 
 func (s *Server) revokeKey(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	if err := checkQuery(r); err != nil {
@@ -775,6 +792,7 @@ type auditView struct {
 	Group      *string         `json:"group"`
 	Prefix     *string         `json:"prefix"`
 	Details    json.RawMessage `json:"details"`
+	ClientIP   *string         `json:"client_ip"`
 }
 
 type idCursor struct {
@@ -821,7 +839,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 		where = append(where, "id < "+arg(c.ID))
 	}
 	sql := `SELECT id, at, actor, client_id::text, action, object_type, object_id, realm, username, grp,
-		host(prefix) || '/' || masklen(prefix), details FROM audit_log`
+		host(prefix) || '/' || masklen(prefix), details, host(client_ip) FROM audit_log`
 	if len(where) > 0 {
 		sql += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -836,7 +854,7 @@ func (s *Server) listAudit(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 			at time.Time
 		)
 		err := row.Scan(&v.ID, &at, &v.Actor, &v.ClientID, &v.Action, &v.ObjectType, &v.ObjectID, &v.Realm,
-			&v.User, &v.Group, &v.Prefix, &v.Details)
+			&v.User, &v.Group, &v.Prefix, &v.Details, &v.ClientIP)
 		v.At = ts(at)
 		return v, err
 	})

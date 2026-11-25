@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ipvalet-api /usr/local/bin/ipvalet-api
 USER nonroot:nonroot
-# API (behind a TLS-terminating proxy) and metrics (keep off the proxy).
-EXPOSE 8080 9090
+# API (behind a TLS-terminating proxy); admin API and metrics (keep both off the proxy).
+EXPOSE 8080 8081 9090
 ENTRYPOINT ["/usr/local/bin/ipvalet-api"]
 CMD ["serve"]

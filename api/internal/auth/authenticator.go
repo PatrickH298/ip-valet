@@ -73,6 +73,7 @@ type Authenticator struct {
 	envKeyHash []byte
 	log        *slog.Logger
 	throttle   *FailureThrottle
+	keys       *KeyIndex
 
 	// OnFailure, if set, is called with a Fail* reason for every refused request.
 	OnFailure func(reason string)
@@ -92,8 +93,36 @@ func NewAuthenticator(pool *pgxpool.Pool, envKeyID string, envKeyHash []byte, fa
 		envKeyHash: envKeyHash,
 		log:        log,
 		throttle:   NewFailureThrottle(failuresPerMinute),
+		keys:       NewKeyIndex(pool),
 		touched:    map[string]time.Time{},
 		touchCh:    make(chan string, 256),
+	}
+}
+
+// LoadKeys fills the key index from the database; call it before serving.
+func (a *Authenticator) LoadKeys(ctx context.Context) error { return a.keys.LoadAll(ctx) }
+
+// RememberKey adds a key this instance just created to the index.
+func (a *Authenticator) RememberKey(id string, hash []byte) { a.keys.Add(id, hash) }
+
+// KeyCreated handles an ipvalet_keys notification: another instance (or the
+// create-admin-key command) stored a key.
+func (a *Authenticator) KeyCreated(id string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := a.keys.LoadOne(ctx, id); err != nil {
+		a.log.Warn("loading a new key into the index failed; the periodic reload will pick it up",
+			"key_id", id, "error", err.Error())
+	}
+}
+
+// ReloadKeys reloads the whole index, for example after the LISTEN
+// connection reconnects and notifications may have been missed.
+func (a *Authenticator) ReloadKeys() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := a.keys.LoadAll(ctx); err != nil {
+		a.log.Warn("reloading the key index failed", "error", err.Error())
 	}
 }
 
@@ -148,29 +177,36 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 		return &Principal{Actor: EnvAdminActor, Kind: KindAdmin, KeyID: key.ID}, nil
 	}
 
+	// Unknown ids and wrong secrets are refused from memory: a flood of bad
+	// keys costs no database work.
+	hash, known := a.keys.Lookup(key.ID)
+	if !known {
+		return nil, a.fail(clientIP, FailUnknownKey, key.ID)
+	}
+	if subtle.ConstantTimeCompare(key.Hash(), hash) != 1 {
+		return nil, a.fail(clientIP, FailWrongSecret, key.ID)
+	}
+
 	var (
 		p                  = &Principal{Actor: key.ID, KeyID: key.ID}
-		hash               []byte
 		clientID, workerID *string
 		active             bool
 		realms             []string
 	)
 	err = a.pool.QueryRow(ctx, `
-		SELECT k.kind, k.secret_hash, k.client_id::text, k.worker_id::text,
+		SELECT k.kind, k.client_id::text, k.worker_id::text,
 		       (k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())),
 		       ARRAY(SELECT cr.realm::text FROM client_realms cr
 		             WHERE cr.client_id = k.client_id ORDER BY cr.realm)
 		FROM api_keys k
 		WHERE k.id = $1`, key.ID).
-		Scan(&p.Kind, &hash, &clientID, &workerID, &active, &realms)
+		Scan(&p.Kind, &clientID, &workerID, &active, &realms)
 	if errors.Is(err, pgx.ErrNoRows) {
+		a.keys.Remove(key.ID) // deleted with its client or worker
 		return nil, a.fail(clientIP, FailUnknownKey, key.ID)
 	}
 	if err != nil {
 		return nil, err
-	}
-	if subtle.ConstantTimeCompare(key.Hash(), hash) != 1 {
-		return nil, a.fail(clientIP, FailWrongSecret, key.ID)
 	}
 	if !active {
 		return nil, a.fail(clientIP, FailInactive, key.ID)
@@ -221,14 +257,22 @@ func (a *Authenticator) touch(id string) {
 	}
 }
 
-// Run writes last_used_at updates and evicts idle throttle state until ctx ends.
+// keyReloadEvery is the backstop full reload of the key index.
+const keyReloadEvery = 5 * time.Minute
+
+// Run writes last_used_at updates, evicts idle throttle state and reloads the
+// key index until ctx ends.
 func (a *Authenticator) Run(ctx context.Context) {
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
+	reload := time.NewTicker(keyReloadEvery)
+	defer reload.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-reload.C:
+			a.ReloadKeys()
 		case id := <-a.touchCh:
 			uctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			_, err := a.pool.Exec(uctx, `UPDATE api_keys SET last_used_at = now() WHERE id = $1`, id)
