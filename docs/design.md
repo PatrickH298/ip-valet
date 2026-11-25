@@ -372,7 +372,7 @@ Questions that were open in the first draft, and how they were settled.
 | Question | Decision |
 | --- | --- |
 | Deleting a realm that still has entries | Its entries are removed (they read `removing` until each worker that held them confirms); the admin dashboard counts them and asks first. |
-| Admin dashboard | A separate component that holds one admin key and calls the admin API server-side; people sign in to it (form or basic auth now, OpenID Connect later), and the audit log records each change with their name. See [dashboard.md](dashboard.md). |
+| Admin dashboard | A separate component that holds one admin key and calls the admin API server-side; it has one login, admin / admin until changed on its Account page, with form or basic sign-in (OpenID Connect later), and the audit log records each change with the login's name. See [dashboard.md](dashboard.md). |
 | A submitted prefix with host bits set (`203.0.113.7/24`) | Normalised to `203.0.113.0/24`; the canonical form is returned. |
 | `DEFAULT_TTL` for seeded TTL rules | Set per deployment by environment variable (`IPVALET_DEFAULT_TTL`), default 30 days; used only when a realm is created. |
 | Admin API exposure | On its own listener, never behind the public proxy. |

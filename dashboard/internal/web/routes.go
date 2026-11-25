@@ -46,6 +46,11 @@ func (s *Server) routes(m *http.ServeMux) {
 
 	s.handle(m, "GET /audit", s.audit)
 
+	if s.Local != nil {
+		s.handle(m, "GET /account", s.account)
+		s.handle(m, "POST /account", s.changeLogin)
+	}
+
 	m.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusNotFound, "Not found", "There is no such page.")
 	})

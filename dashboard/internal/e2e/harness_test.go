@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/PatrickH298/ip-valet/dashboard/internal/app"
+	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 	"github.com/PatrickH298/ip-valet/dashboard/internal/config"
 )
 
@@ -226,12 +227,12 @@ type dash struct {
 	KeyID string
 }
 
-const (
-	alicePW = "alice-password"
-	bobPW   = "bob-password"
-)
+// alicePW is the password of the login newDash sets up, alice.
+const alicePW = "alice-password"
 
-// newDash starts a dashboard with its own admin key and two users.
+// newDash starts a dashboard with its own admin key, whose login is alice
+// with form sign-in. mod may change the configuration, or the login in
+// cfg.DataDir (see setLogin), before the dashboard starts.
 func newDash(t *testing.T, mod func(*config.Config)) *dash {
 	t.Helper()
 	if env.skip != "" {
@@ -255,19 +256,25 @@ func newDash(t *testing.T, mod func(*config.Config)) *dash {
 
 func testConfig(t *testing.T, key string) config.Config {
 	t.Helper()
-	users := filepath.Join(t.TempDir(), "users")
-	var lines []string
-	for _, u := range [][2]string{{"alice", alicePW}, {"bob", bobPW}} {
-		h, _ := bcrypt.GenerateFromPassword([]byte(u[1]), bcrypt.MinCost)
-		lines = append(lines, u[0]+":"+string(h))
-	}
-	if err := os.WriteFile(users, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+	dir := t.TempDir()
+	setLogin(t, dir, auth.MethodForm, "alice", alicePW)
+	api, _ := url.Parse(env.apiAdmin)
+	return config.Config{APIURL: api, APIKey: key, APITimeout: 10 * time.Second, DataDir: dir,
+		SessionIdle: 30 * time.Minute, SessionMax: 12 * time.Hour, LoginFailuresPerMinute: 10,
+		Location: time.UTC, ShutdownTimeout: 5 * time.Second, LogLevel: slog.LevelWarn}
+}
+
+// setLogin saves a login in a data directory, with a cheap hash for speed.
+func setLogin(t *testing.T, dir, method, name, pw string) {
+	t.Helper()
+	h, _ := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.MinCost)
+	s, err := auth.OpenStore(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	api, _ := url.Parse(env.apiAdmin)
-	return config.Config{APIURL: api, APIKey: key, APITimeout: 10 * time.Second, Auth: config.AuthForm,
-		UsersFile: users, SessionIdle: 30 * time.Minute, SessionMax: 12 * time.Hour, LoginFailuresPerMinute: 10,
-		Location: time.UTC, ShutdownTimeout: 5 * time.Second, LogLevel: slog.LevelWarn}
+	if err := s.Save(auth.Login{Method: method, Username: name, Hash: string(h)}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func logger() *slog.Logger {

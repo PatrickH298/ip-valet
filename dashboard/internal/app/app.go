@@ -2,7 +2,6 @@
 package app
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -34,20 +33,23 @@ type Env struct {
 	Stdin  io.Reader
 	Stdout io.Writer
 	Stderr io.Writer
+	Getenv config.Getenv
 	Config func() (config.Config, error)
 }
 
 // OS returns the real process environment.
 func OS() Env {
-	return Env{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Config: config.FromEnvironment}
+	return Env{Stdin: os.Stdin, Stdout: os.Stdout, Stderr: os.Stderr, Getenv: os.LookupEnv,
+		Config: config.FromEnvironment}
 }
 
 const usage = `usage: ipvalet-dashboard [command]
 
 commands:
-  serve                 serve the dashboard (default)
-  hash-password <name>  read a password on stdin; print an htpasswd line for the users file
-  version               print the version
+  serve        serve the dashboard (default)
+  reset-login  forget the saved login, so the dashboard starts again from the
+               default (form sign-in as admin, password admin); then restart it
+  version      print the version
 `
 
 // Main runs a command and returns the exit code.
@@ -63,22 +65,18 @@ func Main(ctx context.Context, args []string, env Env) int {
 			return 2
 		}
 		return serve(ctx, env)
-	case "hash-password":
-		if len(args) != 1 {
+	case "reset-login":
+		if len(args) != 0 {
 			fmt.Fprint(env.Stderr, usage)
 			return 2
 		}
-		line, err := bufio.NewReader(env.Stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			fmt.Fprintln(env.Stderr, "reading the password:", err)
+		dir := config.DataDir(env.Getenv)
+		if err := auth.ResetLogin(dir); err != nil {
+			fmt.Fprintln(env.Stderr, "reset-login:", err)
 			return 1
 		}
-		out, err := auth.HashLine(args[0], strings.TrimRight(line, "\r\n"))
-		if err != nil {
-			fmt.Fprintln(env.Stderr, err)
-			return 1
-		}
-		fmt.Fprintln(env.Stdout, out)
+		fmt.Fprintf(env.Stdout, "The saved login in %s is gone. Restart the dashboard, sign in as %s with password %s, "+
+			"and choose a new password.\n", dir, auth.DefaultUsername, auth.DefaultPassword)
 		return 0
 	case "version":
 		fmt.Fprintf(env.Stdout, "ipvalet-dashboard %s (commit %s, built %s)\n", Version, Commit, Date)
@@ -110,8 +108,7 @@ func serve(ctx context.Context, env Env) int {
 		log.Error("listening", "addr", cfg.ListenAddr, "error", err.Error())
 		return 1
 	}
-	log.Info("serving", "addr", ln.Addr().String(), "version", Version, "auth", cfg.Auth,
-		"api", cfg.APIURL.Redacted())
+	log.Info("serving", "addr", ln.Addr().String(), "version", Version, "api", cfg.APIURL.Redacted())
 	if err := d.Serve(ctx, ln, cfg.ShutdownTimeout); err != nil {
 		log.Error("serving", "error", err.Error())
 		return 1
@@ -127,16 +124,17 @@ type Dashboard struct {
 	log      *slog.Logger
 }
 
-// Start loads users, checks the API server and builds the handler. An API
-// server that cannot be reached is only a warning, since it may start later;
-// one that refuses the dashboard's key is an error.
+// Start reads the login, checks the API server and builds the handler. An
+// API server that cannot be reached is only a warning, since it may start
+// later; one that refuses the dashboard's key is an error.
 func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*Dashboard, error) {
-	users, err := auth.LoadUsers(cfg.UsersFile)
+	store, err := auth.OpenStore(cfg.DataDir)
 	if err != nil {
-		return nil, fmt.Errorf("IPVALET_DASHBOARD_USERS_FILE: %w", err)
+		return nil, fmt.Errorf("IPVALET_DASHBOARD_DATA_DIR: %w", err)
 	}
 	client := api.New(cfg.APIURL, cfg.APIKey, cfg.APITimeout)
-	d := &Dashboard{Throttle: auth.NewThrottle(cfg.LoginFailuresPerMinute), log: log}
+	d := &Dashboard{Throttle: auth.NewThrottle(cfg.LoginFailuresPerMinute),
+		Sessions: auth.NewSessions(cfg.SessionIdle, cfg.SessionMax), log: log}
 
 	if !cfg.SecureCookies {
 		log.Warn("IPVALET_DASHBOARD_SECURE_COOKIES is false: serve the dashboard over HTTPS anyway, " +
@@ -161,25 +159,22 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*Dashboard
 		}
 	}
 
-	var provider auth.Provider
 	w, err := web.New(web.Options{API: client, Log: log, Location: cfg.Location, TrustedProxies: cfg.TrustedProxies,
 		SecureCookies: cfg.SecureCookies, SelfKeyID: keyID(cfg.APIKey), Version: Version})
 	if err != nil {
 		return nil, err
 	}
-	switch cfg.Auth {
-	case config.AuthForm:
-		d.Sessions = auth.NewSessions(cfg.SessionIdle, cfg.SessionMax)
-		provider = &auth.Form{Users: users, Sessions: d.Sessions, Throttle: d.Throttle, Secure: cfg.SecureCookies,
-			Log: log, Render: w.LoginRenderer()}
-	case config.AuthBasic:
-		provider = &auth.Basic{Users: users, Throttle: d.Throttle, Log: log}
-	default:
-		return nil, fmt.Errorf("unknown sign-in method %q", cfg.Auth)
-	}
-	w.Auth = provider
+	local := &auth.Local{Store: store, Sessions: d.Sessions, Throttle: d.Throttle, Secure: cfg.SecureCookies,
+		Log: log, Render: w.LoginRenderer()}
+	w.Auth, w.Local = local, local
 	d.Handler = w.Handler()
-	log.Info("users loaded", "count", users.Len(), "auth", cfg.Auth)
+	if store.IsDefault() {
+		log.Warn("the dashboard still has its default login; sign in as " + auth.DefaultUsername + " with password " +
+			auth.DefaultPassword + " and choose a new password")
+	} else {
+		lg := store.Login()
+		log.Info("login loaded", "user", lg.Username, "method", lg.Method)
+	}
 	return d, nil
 }
 
@@ -222,9 +217,7 @@ func (d *Dashboard) sweep(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
-			if d.Sessions != nil {
-				d.Sessions.Sweep()
-			}
+			d.Sessions.Sweep()
 			d.Throttle.Evict(now)
 		}
 	}

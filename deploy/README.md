@@ -69,22 +69,15 @@ which terminates TLS.
    docker compose -f compose.example.yaml exec api ipvalet-api create-admin-key --name bootstrap --expires 90d
    ```
 
-7. **Set up the dashboard.** Give it its own admin key, with an expiry, and a
-   users file of bcrypt hashes (one line per person):
+7. **Set up the dashboard.** Give it its own admin key, with an expiry, then
+   start it:
 
    ```bash
    docker compose -f compose.example.yaml exec -T api ipvalet-api create-admin-key --name dashboard --expires 365d > secrets/dashboard_api_key
    ```
 
    ```bash
-   read -rsp 'Password for alice: ' PW && printf '%s\n' "$PW" | docker run --rm -i ghcr.io/patrickh298/ip-valet-dashboard:main hash-password alice >> secrets/dashboard_users && unset PW
-   ```
-
-   `htpasswd -nB alice` writes the same kind of line. Give both files to the
-   dashboard's user, then start it:
-
-   ```bash
-   sudo chown 65532 secrets/dashboard_api_key secrets/dashboard_users && sudo chmod 0400 secrets/dashboard_*
+   sudo chown 65532 secrets/dashboard_api_key && sudo chmod 0400 secrets/dashboard_api_key
    ```
 
    ```bash
@@ -92,10 +85,19 @@ which terminates TLS.
    ```
 
    It listens on `127.0.0.1:8090`. From another machine, use an SSH tunnel
-   (`ssh -L 8090:127.0.0.1:8090 <host>`, then <http://localhost:8090>), or
-   route a hostname to `dashboard:8090` in your proxy over HTTPS. Restart the
-   dashboard after changing the users file. Changes made through it are
-   audited with the person's name.
+   (`ssh -L 8090:127.0.0.1:8090 <host>`, then open <http://localhost:8090>).
+
+   **Sign in with user name `admin` and password `admin`**, then choose a new
+   password on the Account page that opens; the dashboard cannot be used until
+   you do. The login is kept in the `dashboard-data` volume. To use the
+   dashboard from elsewhere, route a hostname to `dashboard:8090` in your proxy
+   over HTTPS, after changing the default login.
+
+   Lost the password? Reset the login to `admin` / `admin` and sign in again:
+
+   ```bash
+   docker compose -f compose.example.yaml exec dashboard ipvalet-dashboard reset-login && docker compose -f compose.example.yaml restart dashboard
+   ```
 
 8. **Route the public hostname** in your proxy to `api:8080`. Do not route
    8081 or 9090.
@@ -117,9 +119,10 @@ which terminates TLS.
 - **Environment admin key.** If you bootstrap with an environment key, prefer
   `IPVALET_ADMIN_KEY_HASH`, so this host never holds the key, or
   `IPVALET_ADMIN_KEY_FILE` over plain `IPVALET_ADMIN_KEY`.
-- **Dashboard.** It holds an admin key and gives full admin access to everyone
-  in its users file. Expose it only over HTTPS, keep the users file short, and
-  revoke the dashboard's key if the host is compromised. Failed sign-ins are
+- **Dashboard.** It holds an admin key and gives full admin access to whoever
+  signs in. Change the default `admin` / `admin` login before exposing it, expose
+  it only over HTTPS, and revoke the dashboard's key if the host is
+  compromised. Failed sign-ins are
   throttled per network, as the API throttles failed keys; authentik or
   another forward-auth layer in front of it adds a second gate.
 - **Backups.** Back up the `db-data` volume or run `pg_dump` regularly.

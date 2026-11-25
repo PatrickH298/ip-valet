@@ -9,21 +9,35 @@ import (
 	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 )
 
-func TestHashPassword(t *testing.T) {
-	var out, errOut bytes.Buffer
-	env := Env{Stdin: strings.NewReader("s3cret pass\n"), Stdout: &out, Stderr: &errOut}
-	if code := Main(context.Background(), []string{"hash-password", "Zoë"}, env); code != 0 {
-		t.Fatalf("exit %d: %s", code, errOut.String())
-	}
-	u, err := auth.ParseUsers(strings.NewReader(out.String()))
+func TestResetLogin(t *testing.T) {
+	dir := t.TempDir()
+	st, err := auth.OpenStore(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !u.Check("Zoë", "s3cret pass") {
-		t.Fatal("the printed line does not check")
+	if err := st.Save(auth.Login{Method: auth.MethodForm, Username: "ops",
+		Hash: "$2a$04$abcdefghijklmnopqrstuuOw1ah6S5eEcIu6Hw9IJCgvWWWnIDmV2"}); err != nil {
+		t.Fatal(err)
 	}
-	if code := Main(context.Background(), []string{"hash-password"}, env); code != 2 {
-		t.Fatalf("no name: exit %d", code)
+	var out, errOut bytes.Buffer
+	env := Env{Stdout: &out, Stderr: &errOut, Getenv: func(k string) (string, bool) {
+		if k == "IPVALET_DASHBOARD_DATA_DIR" {
+			return dir, true
+		}
+		return "", false
+	}}
+	if code := Main(context.Background(), []string{"reset-login"}, env); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	if !strings.Contains(out.String(), "admin") {
+		t.Fatalf("output %q", out.String())
+	}
+	st, err = auth.OpenStore(dir)
+	if err != nil || !st.IsDefault() {
+		t.Fatalf("after reset-login: default %v, %v", st != nil && st.IsDefault(), err)
+	}
+	if code := Main(context.Background(), []string{"reset-login", "extra"}, env); code != 2 {
+		t.Fatalf("extra argument: exit %d", code)
 	}
 }
 

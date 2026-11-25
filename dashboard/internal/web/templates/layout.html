@@ -21,7 +21,7 @@
     <a href="/audit"{{if eq .Section "audit"}} aria-current="page"{{end}}>Audit</a>
   </nav>
   <div class="who">
-    <span>{{.User.Name}}</span>
+    <a href="/account"{{if eq .Section "account"}} aria-current="page"{{end}} title="Account">{{.User.Name}}</a>
     {{- if .CanSignOut}}
     <form method="post" action="/logout"><button class="link">Sign out</button></form>
     {{- end}}

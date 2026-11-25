@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/PatrickH298/ip-valet/dashboard/internal/app"
+	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 	"github.com/PatrickH298/ip-valet/dashboard/internal/config"
 )
 
@@ -53,7 +54,7 @@ func TestLoginThrottle(t *testing.T) {
 
 func TestBasicAuth(t *testing.T) {
 	t.Parallel()
-	d := newDash(t, func(c *config.Config) { c.Auth = config.AuthBasic })
+	d := newDash(t, func(c *config.Config) { setLogin(t, c.DataDir, auth.MethodBasic, "bob", "bob-password") })
 	p := d.get("/")
 	if p.Status != 401 || !strings.HasPrefix(p.Header.Get("WWW-Authenticate"), "Basic ") {
 		t.Fatalf("no credentials: %d %v", p.Status, p.Header)
@@ -66,7 +67,7 @@ func TestBasicAuth(t *testing.T) {
 		t.Fatalf("wrong password: %d", resp.StatusCode)
 	}
 	req, _ = http.NewRequest("GET", d.URL+"/", nil)
-	req.SetBasicAuth("bob", bobPW)
+	req.SetBasicAuth("bob", "bob-password")
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -180,7 +181,7 @@ func TestRuleEditing(t *testing.T) {
 	t.Parallel()
 	s := newSetup(t)
 	d := newDash(t, nil)
-	d.signIn("bob", bobPW)
+	d.signIn("alice", alicePW)
 	ttl := items(admin(t, 200, "GET", "/v1/admin/realms/"+s.Realm+"/rules/ttl", nil))[0]["id"].(string)
 	base := "/realms/" + s.Realm + "/rules/"
 
@@ -319,7 +320,7 @@ func TestEntries(t *testing.T) {
 	id := s.submit(t, "carol", "8.8.1.1")
 	s.submit(t, "dave", "8.8.1.2")
 	d := newDash(t, nil)
-	d.signIn("bob", bobPW)
+	d.signIn("alice", alicePW)
 	d.get("/entries?realm="+s.Realm).must(t, 200, "8.8.1.1/32", "8.8.1.2/32", "pending")
 	d.get("/entries?realm="+s.Realm+"&user=carol").must(t, 200, "8.8.1.1/32")
 	if p := d.get("/entries?realm=" + s.Realm + "&user=carol"); strings.Contains(p.Body, "8.8.1.2/32") {
@@ -330,7 +331,7 @@ func TestEntries(t *testing.T) {
 	p := d.post("/entries/"+id+"/delete", nil).must(t, 200, "Delete 8.8.1.1/32 for carol?")
 	d.confirm(p).must(t, 200, "Entry deleted.", "removing")
 	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=entry.delete&realm="+s.Realm, nil))
-	if len(audit) != 1 || audit[0]["on_behalf_of"] != "bob" {
+	if len(audit) != 1 || audit[0]["on_behalf_of"] != "alice" {
 		t.Fatalf("audit %v", audit)
 	}
 }
@@ -404,5 +405,84 @@ func TestStartChecksTheAPI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("realms with the API down: %d", resp.StatusCode)
+	}
+}
+
+// TestFirstBoot signs in with the default login, is made to choose a new
+// password, and keeps it across a restart.
+func TestFirstBoot(t *testing.T) {
+	t.Parallel()
+	var cfg config.Config
+	d := newDash(t, func(c *config.Config) {
+		if err := auth.ResetLogin(c.DataDir); err != nil {
+			t.Fatal(err)
+		}
+		cfg = *c
+	})
+	d.get("/").must(t, 200, "First sign-in", "<strong>admin</strong> and the password is <strong>admin</strong>")
+	// The default login works, but only to replace itself.
+	p := d.post("/login", url.Values{"name": {"admin"}, "password": {"admin"}}).
+		must(t, 200, "You are signed in with the default login")
+	if p.URL.Path != "/account" {
+		t.Fatalf("after the default sign-in: %s", p.URL)
+	}
+	if p := d.get("/realms"); p.URL.Path != "/account" {
+		t.Fatalf("/realms with the default login: %s", p.URL)
+	}
+	d.post("/account", url.Values{"username": {"patrick"}, "method": {"form"}, "current": {"admin"}}).
+		must(t, 400, "choose a new password to replace the default one")
+	d.post("/account", url.Values{"username": {"patrick"}, "method": {"form"}, "current": {"admin"},
+		"new_password": {"short"}, "confirm": {"short"}}).must(t, 400, "at least 10 characters")
+	d.post("/account", url.Values{"username": {"patrick"}, "method": {"form"}, "current": {"wrong"},
+		"new_password": {"a long new password"}, "confirm": {"a long new password"}}).must(t, 400, "wrong password")
+	d.post("/account", url.Values{"username": {"patrick"}, "method": {"form"}, "current": {"admin"},
+		"new_password": {"a long new password"}, "confirm": {"a long new password"}}).
+		must(t, 200, "Login saved.", "Overview", "patrick")
+	// Changes are now possible, and audited under the new name.
+	realm := uniq("r")
+	d.post("/realms", url.Values{"name": {realm}}).must(t, 200, "Realm "+realm)
+	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=realm.create&realm="+realm, nil))
+	if len(audit) != 1 || audit[0]["on_behalf_of"] != "patrick" {
+		t.Fatalf("audit %v", audit)
+	}
+	d.post("/logout", nil)
+	d.post("/login", url.Values{"name": {"admin"}, "password": {"admin"}}).must(t, 401)
+
+	// A restart keeps the new login, and signs everyone out.
+	dd, err := app.Start(context.Background(), cfg, logger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(dd.Handler)
+	defer srv.Close()
+	d2 := &dash{t: t, URL: srv.URL, c: &http.Client{Jar: func() http.CookieJar { j, _ := cookiejar.New(nil); return j }()}}
+	if p := d2.get("/"); strings.Contains(p.Body, "First sign-in") {
+		t.Fatal("the restarted dashboard is back to the default login")
+	}
+	d2.post("/login", url.Values{"name": {"admin"}, "password": {"admin"}}).must(t, 401)
+	d2.post("/login", url.Values{"name": {"patrick"}, "password": {"a long new password"}}).must(t, 200, "Overview")
+}
+
+// TestSwitchToBasic changes the sign-in method on the Account page.
+func TestSwitchToBasic(t *testing.T) {
+	t.Parallel()
+	d := newDash(t, nil)
+	d.signIn("alice", alicePW)
+	d.get("/account").must(t, 200, "Account", "Sign-in method")
+	d.post("/account", url.Values{"username": {"alice"}, "method": {"basic"}, "current": {alicePW}}).must(t, 401)
+	// The session is gone; the browser is now asked for basic credentials.
+	p := d.get("/")
+	if p.Status != 401 || !strings.HasPrefix(p.Header.Get("WWW-Authenticate"), "Basic ") {
+		t.Fatalf("after switching: %d %v", p.Status, p.Header)
+	}
+	req, _ := http.NewRequest("GET", d.URL+"/account", nil)
+	req.SetBasicAuth("alice", alicePW)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("basic auth: %d", resp.StatusCode)
 	}
 }

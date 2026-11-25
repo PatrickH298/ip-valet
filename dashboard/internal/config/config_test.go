@@ -23,9 +23,8 @@ func load(env map[string]string, files map[string]string) (Config, error) {
 
 func base() map[string]string {
 	return map[string]string{
-		"IPVALET_DASHBOARD_API_URL":    "http://api:8081/",
-		"IPVALET_DASHBOARD_API_KEY":    testKey,
-		"IPVALET_DASHBOARD_USERS_FILE": "/run/secrets/users",
+		"IPVALET_DASHBOARD_API_URL": "http://api:8081/",
+		"IPVALET_DASHBOARD_API_KEY": testKey,
 	}
 }
 
@@ -35,7 +34,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":8090" || c.APIURL.String() != "http://api:8081" || c.APIKey != testKey ||
-		c.Auth != AuthForm || !c.SecureCookies || c.SessionIdle != 30*time.Minute || c.SessionMax != 12*time.Hour ||
+		c.DataDir != "/data" || !c.SecureCookies || c.SessionIdle != 30*time.Minute || c.SessionMax != 12*time.Hour ||
 		c.LoginFailuresPerMinute != 10 || c.Location != time.UTC || c.APITimeout != 10*time.Second {
 		t.Fatalf("defaults: %+v", c)
 	}
@@ -66,8 +65,7 @@ func TestInvalid(t *testing.T) {
 		"API URL with user": {set: map[string]string{"IPVALET_DASHBOARD_API_URL": "http://u:p@api:8081"}, want: "credentials"},
 		"no key":            {drop: []string{"IPVALET_DASHBOARD_API_KEY"}, want: "IPVALET_DASHBOARD_API_KEY: required"},
 		"bad key":           {set: map[string]string{"IPVALET_DASHBOARD_API_KEY": "secret"}, want: "must be an ip-valet key"},
-		"auth method":       {set: map[string]string{"IPVALET_DASHBOARD_AUTH": "oidc"}, want: "must be form or basic"},
-		"no users file":     {drop: []string{"IPVALET_DASHBOARD_USERS_FILE"}, want: "IPVALET_DASHBOARD_USERS_FILE: required"},
+		"empty data dir":    {set: map[string]string{"IPVALET_DASHBOARD_DATA_DIR": ""}, want: "IPVALET_DASHBOARD_DATA_DIR"},
 		"cookies":           {set: map[string]string{"IPVALET_DASHBOARD_SECURE_COOKIES": "maybe"}, want: "true or false"},
 		"idle over max": {set: map[string]string{"IPVALET_DASHBOARD_SESSION_IDLE": "2h", "IPVALET_DASHBOARD_SESSION_MAX": "1h"},
 			want: "must not be longer"},
@@ -93,7 +91,7 @@ func TestInvalid(t *testing.T) {
 
 func TestSettings(t *testing.T) {
 	env := base()
-	env["IPVALET_DASHBOARD_AUTH"] = "Basic"
+	env["IPVALET_DASHBOARD_DATA_DIR"] = "/var/lib/ipvalet-dashboard"
 	env["IPVALET_DASHBOARD_TRUSTED_PROXIES"] = "10.0.0.1, 172.16.0.0/12"
 	env["IPVALET_DASHBOARD_TIMEZONE"] = "Europe/Berlin"
 	env["IPVALET_DASHBOARD_SECURE_COOKIES"] = "false"
@@ -101,7 +99,7 @@ func TestSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Auth != AuthBasic || len(c.TrustedProxies) != 2 || c.Location.String() != "Europe/Berlin" || c.SecureCookies {
+	if c.DataDir != "/var/lib/ipvalet-dashboard" || len(c.TrustedProxies) != 2 || c.Location.String() != "Europe/Berlin" || c.SecureCookies {
 		t.Fatalf("%+v", c)
 	}
 }

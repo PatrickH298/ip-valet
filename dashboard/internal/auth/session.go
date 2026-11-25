@@ -74,6 +74,13 @@ func (s *Sessions) Sweep() {
 	}
 }
 
+// Clear ends every session, for example after the login changes.
+func (s *Sessions) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	clear(s.byID)
+}
+
 // Len is the number of sessions held, live or not yet swept.
 func (s *Sessions) Len() int {
 	s.mu.Lock()
@@ -89,8 +96,4 @@ func randomBytes(n int) []byte {
 	b := make([]byte, n)
 	_, _ = rand.Read(b) // never fails; see crypto/rand.Read
 	return b
-}
-
-func randomPassword() []byte {
-	return []byte(base64.RawURLEncoding.EncodeToString(randomBytes(24)))
 }

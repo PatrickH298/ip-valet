@@ -18,12 +18,16 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/PatrickH298/ip-valet/dashboard/internal/app.Version=${VERSION} \
         -X github.com/PatrickH298/ip-valet/dashboard/internal/app.Commit=${COMMIT} \
         -X github.com/PatrickH298/ip-valet/dashboard/internal/app.Date=${DATE}" \
-      -o /out/ipvalet-dashboard ./cmd/ipvalet-dashboard
+      -o /out/ipvalet-dashboard ./cmd/ipvalet-dashboard \
+ && mkdir -p /out/data
 
-# Static, non-root, no shell; the dashboard needs no writable filesystem.
+# Static, non-root, no shell. The only writable path is /data, which holds
+# the login; a new volume there takes its owner from the image.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ipvalet-dashboard /usr/local/bin/ipvalet-dashboard
+COPY --from=build --chown=65532:65532 /out/data /data
 USER nonroot:nonroot
+VOLUME ["/data"]
 EXPOSE 8090
 ENTRYPOINT ["/usr/local/bin/ipvalet-dashboard"]
 CMD ["serve"]

@@ -3,7 +3,7 @@
 A web interface for the ip-valet admin API: realms and their rules, workers
 and their subscriptions, clients, keys, entries, the audit log and worker
 health. It is one Go binary that calls the API server's admin listener with
-its own admin key. It keeps no data of its own. The
+its own admin key. The only data it keeps is its login. The
 [dashboard design](../docs/dashboard.md) explains how it works and why.
 
 Pages are server-rendered HTML with no JavaScript. Anything that changes
@@ -20,24 +20,43 @@ ipvalet-dashboard [command]
 | Command | Does |
 | --- | --- |
 | `serve` (default) | Serves the dashboard until SIGTERM or SIGINT |
-| `hash-password <name>` | Reads a password on stdin and prints an htpasswd line (bcrypt) for the users file |
+| `reset-login` | Deletes the saved login, so the dashboard starts again from the default login; restart it afterwards |
 | `version` | Prints the version, commit and build date |
 
 ## Signing in
 
-`IPVALET_DASHBOARD_AUTH` picks the method:
+The dashboard has one login. **On first boot it is form sign-in with user name
+`admin` and password `admin`.** Signing in with it leads to the Account page,
+and the dashboard cannot be used until you choose a new password there.
 
-- `form` (default): a sign-in page, then a session cookie. Sessions are kept in
-  memory, so a restart signs everyone out.
-- `basic`: HTTP basic auth on every request. Browsers offer no sign-out.
+The Account page (your user name, top right) changes the user name, the
+password and the sign-in method:
 
-Both read people from `IPVALET_DASHBOARD_USERS_FILE`, an htpasswd file with
-bcrypt hashes. Make lines with `htpasswd -nB <name>` or `hash-password`. Every
-person in the file is a full admin. The API's audit log records each change
-with the person's name (`on_behalf_of`) next to the dashboard's key.
+- **Sign-in page** (`form`, the default): a session cookie follows. Sessions
+  are kept in memory, so a restart signs you out.
+- **HTTP basic auth** (`basic`): the browser asks for the user name and
+  password. Browsers offer no sign-out.
 
-Failed sign-ins are throttled per client network (10 a minute by default).
-Form posts from other sites are refused.
+Every change needs the current password, and saving signs out every other
+session. The login is saved as `login.json` (a bcrypt hash, never the password)
+in `IPVALET_DASHBOARD_DATA_DIR`, which must be writable and should be a
+persistent volume.
+
+**Lost the password?** Run `reset-login` where the dashboard runs, then restart
+it; the login is `admin` / `admin` again:
+
+```bash
+docker compose exec dashboard ipvalet-dashboard reset-login
+```
+
+```bash
+docker compose restart dashboard
+```
+
+The API's audit log records each change made through the dashboard under the
+login's user name (`on_behalf_of`), next to the dashboard's key. Failed sign-ins
+are throttled per client network (10 a minute by default), and form posts from
+other sites are refused. External sign-in with OpenID Connect is planned.
 
 ## Environment variables
 
@@ -49,8 +68,7 @@ names the variable.
 | --- | --- | --- |
 | `IPVALET_DASHBOARD_API_URL` | required | The API server's admin listener, for example `http://api:8081` |
 | `IPVALET_DASHBOARD_API_KEY` *(secret)* | required | The admin key the dashboard uses; give it its own, with an expiry |
-| `IPVALET_DASHBOARD_USERS_FILE` | required | htpasswd file with bcrypt hashes; read at startup |
-| `IPVALET_DASHBOARD_AUTH` | `form` | `form` or `basic` |
+| `IPVALET_DASHBOARD_DATA_DIR` | `/data` | Writable directory for the login (`login.json`); keep it on a persistent volume |
 | `IPVALET_DASHBOARD_LISTEN_ADDR` | `:8090` | Listen address (plain HTTP, behind a proxy that terminates TLS) |
 | `IPVALET_DASHBOARD_SECURE_COOKIES` | `true` | Mark cookies `Secure` (with the `__Host-` prefix). Needs HTTPS or `http://localhost`; `false` logs a warning |
 | `IPVALET_DASHBOARD_SESSION_IDLE` | `30m` | Idle time that ends a session |
@@ -81,7 +99,8 @@ docker build -t ip-valet-dashboard \
 ```
 
 The image is built from `gcr.io/distroless/static-debian12:nonroot`. It runs as
-a non-root user, needs no writable filesystem and exposes 8090. The
+a non-root user and exposes 8090. Its only writable path is `/data`, a volume
+owned by that user. The
 [Compose example](../deploy/README.md) runs it next to the API server.
 
 ## Development
@@ -106,7 +125,7 @@ dashboard/
 └── internal/
     ├── app/                 wiring, serve, commands
     ├── config/              environment parsing and validation
-    ├── auth/                users file, sessions, form and basic sign-in, throttle
+    ├── auth/                the login and its store, sessions, form and basic sign-in, throttle
     ├── api/                 client for the admin API
     ├── web/                 handlers, templates, stylesheet
     └── e2e/                 end-to-end tests against a real API server

@@ -24,6 +24,7 @@ import (
 type Options struct {
 	API            *api.Admin
 	Auth           auth.Provider
+	Local          *auth.Local // the local login, changed on the Account page; nil with external sign-in
 	Log            *slog.Logger
 	Location       *time.Location
 	TrustedProxies []netip.Prefix
@@ -104,6 +105,11 @@ func (s *Server) requireSignIn(next http.Handler) http.Handler {
 		}
 		if info := infoFrom(r.Context()); info != nil {
 			info.user = id.Name
+		}
+		// The default login must be replaced before anything else.
+		if s.Local != nil && s.Local.Store.IsDefault() && r.URL.Path != "/account" {
+			http.Redirect(w, r, "/account", http.StatusSeeOther)
+			return
 		}
 		ctx := api.OnBehalfOf(auth.WithIdentity(r.Context(), id), id.Name)
 		next.ServeHTTP(w, r.WithContext(ctx))

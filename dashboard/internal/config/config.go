@@ -23,8 +23,7 @@ type Config struct {
 	APIKey     string   // the admin key the dashboard uses
 	APITimeout time.Duration
 
-	Auth          string // AuthForm or AuthBasic
-	UsersFile     string
+	DataDir       string // holds the local login
 	SecureCookies bool
 	SessionIdle   time.Duration
 	SessionMax    time.Duration
@@ -36,12 +35,6 @@ type Config struct {
 	ShutdownTimeout time.Duration
 	LogLevel        slog.Level
 }
-
-// Sign-in methods.
-const (
-	AuthForm  = "form"
-	AuthBasic = "basic"
-)
 
 // Getenv looks up an environment variable; os.LookupEnv in production.
 type Getenv func(string) (string, bool)
@@ -163,15 +156,9 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 	}
 	c.APITimeout = l.positiveDuration("IPVALET_DASHBOARD_API_TIMEOUT", "10s")
 
-	c.Auth = strings.ToLower(strings.TrimSpace(l.raw("IPVALET_DASHBOARD_AUTH", AuthForm)))
-	switch c.Auth {
-	case AuthForm, AuthBasic:
-		c.UsersFile = l.raw("IPVALET_DASHBOARD_USERS_FILE", "")
-		if c.UsersFile == "" {
-			l.fail("IPVALET_DASHBOARD_USERS_FILE", "required with IPVALET_DASHBOARD_AUTH=%s", c.Auth)
-		}
-	default:
-		l.fail("IPVALET_DASHBOARD_AUTH", "must be form or basic")
+	c.DataDir = DataDir(getenv)
+	if c.DataDir == "" {
+		l.fail("IPVALET_DASHBOARD_DATA_DIR", "must not be empty")
 	}
 	c.SecureCookies = l.boolean("IPVALET_DASHBOARD_SECURE_COOKIES", "true")
 	c.SessionIdle = l.positiveDuration("IPVALET_DASHBOARD_SESSION_IDLE", "30m")
@@ -216,6 +203,14 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 		return Config{}, errors.Join(l.errs...)
 	}
 	return c, nil
+}
+
+// DataDir is the data directory, IPVALET_DASHBOARD_DATA_DIR (default /data).
+func DataDir(getenv Getenv) string {
+	if v, ok := getenv("IPVALET_DASHBOARD_DATA_DIR"); ok {
+		return v
+	}
+	return "/data"
 }
 
 // ParseNet parses an IP address (as a single-address prefix) or a CIDR prefix.

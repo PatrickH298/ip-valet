@@ -45,13 +45,16 @@ services:
     environment:
       IPVALET_DASHBOARD_API_URL: http://api:8081 # the admin listener
       IPVALET_DASHBOARD_API_KEY_FILE: /run/secrets/dashboard_api_key
-      IPVALET_DASHBOARD_USERS_FILE: /run/secrets/dashboard_users
       # Secure cookies need HTTPS, or http://localhost (an SSH tunnel). Set
       # false only to use plain HTTP across your LAN.
       IPVALET_DASHBOARD_SECURE_COOKIES: "true"
       IPVALET_DASHBOARD_TRUSTED_PROXIES: ${IPVALET_TRUSTED_PROXIES:?set to your reverse proxy's address or subnet}
       IPVALET_DASHBOARD_TIMEZONE: UTC
-    secrets: [dashboard_api_key, dashboard_users]
+    secrets: [dashboard_api_key]
+    volumes:
+      # The login (first boot: admin / admin, changed on first sign-in).
+      # The rest of the filesystem stays read-only.
+      - dashboard-data:/data
     ports:
       # On this host only, like the admin API. Route a hostname to
       # dashboard:8090 in your proxy (over HTTPS) to use it from elsewhere.
@@ -95,8 +98,7 @@ secrets:
     file: ./secrets/ipvalet_db_password
   dashboard_api_key:
     file: ./secrets/dashboard_api_key
-  dashboard_users:
-    file: ./secrets/dashboard_users
 
 volumes:
   db-data:
+  dashboard-data:
