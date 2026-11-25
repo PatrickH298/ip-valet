@@ -64,8 +64,12 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 - Format `ipv_<keyid>_<secret>`, with 256 bits of randomness in the secret.
 - Only a SHA-256 hash of the secret is stored; the key is looked up by its id and compared in constant time.
 - Sent as `Authorization: Bearer <key>`, over TLS only (terminated by the reverse proxy).
-- Several active keys per client or worker, so rotation can overlap; optional expiry per key; revocation takes effect on the key's next request, and an open event stream ends at its next wake-up; `last_used_at` is recorded.
-- Optional per-client rate limit, held in memory per API instance (two instances would each enforce their own). Off by default.
+- Several active keys per client or worker, so rotation can overlap; optional expiry per key; revocation takes effect on the key's next request, and an open event stream ends within one heartbeat (20 s); `last_used_at` is recorded.
+- **Brute-force protection.** Guessing a 256-bit secret is not feasible at any rate, so the protection is aimed at floods and scanning. A network (an IPv4 address, or an IPv6 /64, since one host can use a whole /64) that fails authentication 10 times in a minute has its requests refused unchecked, with 429 and `Retry-After`, until its budget refills; a refused request costs no database work. Successful requests never count, and a valid key used on the wrong route is not a failure. Failures are logged (a wrong secret for a real key id at warning level) and counted in metrics by reason.
+- **The caller's address.** Behind the reverse proxy every connection comes from the proxy, so the server reads `X-Forwarded-For` only when the connection comes from a configured trusted proxy, taking the rightmost address that is not a trusted proxy. A client cannot pick its address by sending the header itself.
+- **Event streams.** Each key may hold a few open event streams per API instance (4 by default), so a leaked key cannot multiply the work every change causes.
+- **No caching.** Responses under `/v1` carry `Cache-Control: no-store`, since they can hold new keys and address lists.
+- There are no rate limits on authenticated requests for now.
 
 ## Data model
 
@@ -74,7 +78,7 @@ All state lives in Postgres. A wildcard is stored as NULL and written `*` in the
 | Table | Key fields | Notes |
 | --- | --- | --- |
 | realms | name | Created by an admin. Creating one seeds its default rules (see Matching and rules). |
-| clients | name, realms (one or more), optional rate limit | A client's scope is its realms. |
+| clients | name, realms (one or more) | A client's scope is its realms. |
 | api\_keys | key id, type (admin, client, worker), owner (client or worker), secret hash, expires\_at, revoked\_at, last\_used\_at | Environment-supplied admin keys are not stored here. |
 | workers | name, label, families (IPv4, IPv6 or both), applied\_revision, applied\_generated\_at, subscriptions\_revision, last\_seen\_at, last\_error, last\_instance, last\_version | Registered by an admin. The label is the only part clients see. |
 | subscriptions | worker, realm or `*`, user or `*`, group or `*` | Set by an admin for a worker. A specific user or group with realm `*` is allowed, with a warning. |
@@ -318,7 +322,7 @@ The API server is written in Go: `net/http` (method-and-path routing, SSE), `net
 
 **Ready for a second instance.** One API instance runs today. To keep a second one possible:
 
-- No state that matters lives in memory, except per-instance rate limits.
+- No state that matters lives in memory. The failed-authentication throttle and the per-key stream count are kept per instance; they are protections, not records, so a second instance only gives an attacker a second budget.
 - Change signals go through Postgres `NOTIFY` even with one instance.
 - Background jobs (purge, migrations) take advisory locks.
 - Several worker processes can share one worker's keys, and status reports name their `instance`, so a standby process with a lease can be added later without changing the protocol.
@@ -350,7 +354,7 @@ ip-valet/
 - **One repo while the protocol settles.** An API change and the matching worker and client changes land in one pull request. A component moves to its own repo once it has its own contributors or release pace; third-party workers and clients live in their own repos from the start.
 - **Versioning per component.** Semantic versions with path-prefixed tags (`api/v0.3.0`, `workers/unifi/v0.2.1`), which is also what Go requires for a module in a subdirectory. One image per component, for example `ghcr.io/patrickh298/ip-valet-api`, so a UniFi fix does not republish the API.
 - **Images.** Built on every push to `main` and weekly.
-- **CI.** A required status check that never runs blocks merging, so CI is one always-running workflow that detects which components changed, builds and tests those, and ends in one summary job. Only that job is the required check in the `main` ruleset.
+- **CI.** A required status check that never runs blocks merging, so CI is one always-running workflow (`.github/workflows/ci.yml`) that detects which components changed, checks and tests those, checks DCO sign-offs on pull requests, and ends in one summary job, `CI summary`. Only that job is the required check in the `main` ruleset.
 - **Licence.** AGPL-3.0. Workers and clients that talk to the API over HTTP are separate programs and are not bound by it; the README says so. Likely Go dependencies (MIT, BSD, Apache-2.0) are compatible.
 - **Contributions.** Developer Certificate of Origin: every commit carries a `Signed-off-by` line, checked in CI.
 
@@ -363,7 +367,7 @@ Questions that were open in the first draft, and how they were settled.
 | Deleting a realm that still has entries | Its entries are removed (they read `removing` until each worker that held them confirms); warning the admin is up to the admin dashboard. |
 | A submitted prefix with host bits set (`203.0.113.7/24`) | Normalised to `203.0.113.0/24`; the canonical form is returned. |
 | `DEFAULT_TTL` for seeded TTL rules | Set per deployment by environment variable (`IPVALET_DEFAULT_TTL`), default 30 days; used only when a realm is created. |
-| Default rate limit for client keys | None (off); configurable per deployment and per client. |
+| Rate limits | None for now. Failed authentication is throttled per network instead (see Trust model and authentication). |
 | Per-client user and group allow-lists | Removed. A client's scope is its realms; the realms' rules bound what it can register. |
 | Existing entries that a rule change makes invalid | Always enforced on confirmation: removed or shortened. Caps keep the most recently submitted prefixes. |
 | Who sets a worker's subscriptions | An admin. A worker cannot read or change its own subscriptions. |

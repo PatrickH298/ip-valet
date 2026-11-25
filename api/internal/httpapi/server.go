@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -43,6 +44,8 @@ type Server struct {
 	Deps
 	mux      *http.ServeMux
 	patterns []string
+
+	warnUntrustedXFF sync.Once
 
 	// streams is cancelled on shutdown to end every SSE stream.
 	streams      context.Context
@@ -144,7 +147,11 @@ func (s *Server) public(pattern string, h func(http.ResponseWriter, *http.Reques
 
 func (s *Server) handle(pattern, kind string, h handlerFunc) {
 	s.register(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		p, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"), kind)
+		var ip netip.Addr
+		if info := reqInfoFrom(r.Context()); info != nil {
+			ip = info.ip
+		}
+		p, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"), kind, ip)
 		if err != nil {
 			s.writeErr(w, r, err)
 			return
@@ -172,6 +179,7 @@ const reqInfoKey ctxKey = 0
 type reqInfo struct {
 	id    string
 	actor string
+	ip    netip.Addr
 }
 
 func reqInfoFrom(ctx context.Context) *reqInfo {
@@ -216,7 +224,22 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		info := &reqInfo{id: newRequestID()}
-		w.Header().Set("X-Request-Id", info.id)
+		var untrustedXFF bool
+		info.ip, untrustedXFF = clientIP(r, s.Config.TrustedProxies)
+		if untrustedXFF {
+			s.warnUntrustedXFF.Do(func() {
+				s.Log.Warn("a request carried X-Forwarded-For from a peer not in IPVALET_TRUSTED_PROXIES; "+
+					"the header is ignored, so every client behind that proxy shares one failed-authentication budget",
+					"peer", info.ip.String())
+			})
+		}
+		h := w.Header()
+		h.Set("X-Request-Id", info.id)
+		h.Set("X-Content-Type-Options", "nosniff")
+		if strings.HasPrefix(r.URL.Path, "/v1/") {
+			// Responses can carry new keys and address lists; no cache may keep them.
+			h.Set("Cache-Control", "no-store")
+		}
 		r = r.WithContext(context.WithValue(r.Context(), reqInfoKey, info))
 		sw := &statusWriter{ResponseWriter: w}
 
@@ -248,7 +271,8 @@ func (s *Server) Handler() http.Handler {
 				level = slog.LevelDebug
 			}
 			s.Log.Log(r.Context(), level, "request", "method", r.Method, "route", route, "status", status,
-				"duration_ms", float64(d.Microseconds())/1000, "actor", info.actor, "request_id", info.id)
+				"duration_ms", float64(d.Microseconds())/1000, "actor", info.actor, "client_ip", info.ip.String(),
+				"request_id", info.id)
 		}()
 
 		if _, pattern := s.mux.Handler(r); pattern == "" {

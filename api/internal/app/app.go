@@ -70,8 +70,9 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 		return nil, fmt.Errorf("LISTEN connection: %w", err)
 	}
 
-	a.Auth = auth.NewAuthenticator(pool, cfg.AdminKeyID, cfg.AdminKeyHash, cfg.DefaultRateLimit, log)
+	a.Auth = auth.NewAuthenticator(pool, cfg.AdminKeyID, cfg.AdminKeyHash, cfg.AuthFailuresPerMinute, log)
 	a.Metrics = metrics.New(pool, a.Hub, log)
+	a.Auth.OnFailure = func(reason string) { a.Metrics.AuthFailed.WithLabelValues(reason).Inc() }
 	a.API = httpapi.New(httpapi.Deps{Config: cfg, Pool: pool, Hub: a.Hub, Auth: a.Auth,
 		Listener: a.Listener, Metrics: a.Metrics, Log: log})
 	a.Purger = &jobs.Purger{Pool: pool, RetentionEntries: cfg.RetentionEntries, RetentionAudit: cfg.RetentionAudit,

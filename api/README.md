@@ -82,7 +82,9 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days
 | `IPVALET_DEFAULT_TTL` | `30d` | Max TTL of the TTL rule seeded into each new realm |
 | `IPVALET_DEFAULT_PREFIX_V4` | `32` | Shortest IPv4 prefix length in the seeded prefix rule |
 | `IPVALET_DEFAULT_PREFIX_V6` | `64` | Shortest IPv6 prefix length in the seeded prefix rule |
-| `IPVALET_DEFAULT_RATE_LIMIT` | `0` | Requests per minute per key for clients without their own limit; `0` = off |
+| `IPVALET_AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications allowed per client network (IPv4 address or IPv6 /64) per minute; after that its requests get 429 until the budget refills. `0` = off |
+| `IPVALET_TRUSTED_PROXIES` | unset | Comma-separated IPs or CIDRs of your reverse proxies. Set it: only their `X-Forwarded-For` is believed, and without it every client behind the proxy shares one failed-authentication budget |
+| `IPVALET_MAX_STREAMS_PER_KEY` | `4` | Open event streams allowed per key, per API instance |
 | `IPVALET_RETENTION_ENTRIES` | `90d` | Purge deleted or expired entries this long after they ended |
 | `IPVALET_RETENTION_AUDIT` | `365d` | Purge audit rows older than this |
 | `IPVALET_PURGE_INTERVAL` | `1h` | How often the purge job runs |
@@ -138,9 +140,14 @@ staticcheck ./...
 IPVALET_TEST_DATABASE_URL='postgres://postgres@localhost:5432/postgres?sslmode=disable' go test ./...
 ```
 
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the same
+checks plus gofmt, `go mod tidy -diff` and govulncheck, then builds and
+smoke-tests the image. Pushes to `main` and `api/vX.Y.Z` tags publish it to
+`ghcr.io`.
+
 `IPVALET_TEST_DATABASE_URL` must be a `postgres://` URL for a role that can
 create databases. Each test creates its own database and drops it afterwards.
-If the variable is unset, the tests that need Postgres are skipped. A throwaway
+If the variable is unset, the tests that need Postgres are skipped (in CI they fail instead). A throwaway
 server for local runs:
 
 ```bash
@@ -163,7 +170,7 @@ api/
     ├── app/               wiring, serve/shutdown, subcommands
     ├── config/            environment parsing and validation
     ├── db/                pool, migrations, transactions, queries, LISTEN loop
-    ├── auth/              key format, hashing, authentication, rate limits
+    ├── auth/              key format, hashing, authentication, failed-authentication throttle
     ├── rules/             names, TTLs, prefix normalisation, rule evaluation, seeding, warnings
     ├── state/             applied state, desired-state ETag
     ├── events/            SSE hub

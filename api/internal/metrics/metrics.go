@@ -24,6 +24,7 @@ type Metrics struct {
 	Requests    *prometheus.CounterVec
 	Duration    *prometheus.HistogramVec
 	Submissions *prometheus.CounterVec
+	AuthFailed  *prometheus.CounterVec
 }
 
 // New registers every metric. pool and streams feed the scrape-time collector.
@@ -41,7 +42,11 @@ func New(pool *pgxpool.Pool, streams StreamCounter, log *slog.Logger) *Metrics {
 			Name: "ipvalet_submissions_total", Help: "Submissions by result: accepted or the first failing code.",
 		}, []string{"result"}),
 	}
-	m.Registry.MustRegister(m.Requests, m.Duration, m.Submissions,
+	m.AuthFailed = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "ipvalet_auth_failures_total",
+		Help: "Requests refused authentication, by reason (malformed, unknown_key, wrong_secret, inactive, throttled).",
+	}, []string{"reason"})
+	m.Registry.MustRegister(m.Requests, m.Duration, m.Submissions, m.AuthFailed,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		&dbCollector{pool: pool, streams: streams, log: log})
 	return m

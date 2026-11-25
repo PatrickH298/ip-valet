@@ -3,7 +3,7 @@
 //
 // Set IPVALET_TEST_DATABASE_URL to a postgres:// URL of a role that may create
 // databases; each test gets its own database, dropped afterwards. Without it
-// the tests that need Postgres are skipped.
+// the tests that need Postgres are skipped, except in CI (CI set), where they fail.
 package testutil
 
 import (
@@ -39,6 +39,9 @@ func NewDatabase(t testing.TB) string {
 	t.Helper()
 	base := os.Getenv(EnvDatabaseURL)
 	if base == "" {
+		if os.Getenv("CI") != "" {
+			t.Fatal(EnvDatabaseURL + " is not set; in CI the Postgres tests must run, not skip")
+		}
 		t.Skip(EnvDatabaseURL + " is not set; skipping a test that needs Postgres")
 	}
 	u, err := url.Parse(base)

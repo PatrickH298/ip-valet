@@ -248,28 +248,22 @@ func (s *Server) deleteRealm(w http.ResponseWriter, r *http.Request, p *auth.Pri
 // ---------- clients ----------
 
 type clientView struct {
-	ID                 string   `json:"id"`
-	Name               string   `json:"name"`
-	Realms             []string `json:"realms"`
-	RateLimitPerMinute *int     `json:"rate_limit_per_minute"`
-	CreatedAt          string   `json:"created_at"`
-	UpdatedAt          string   `json:"updated_at"`
+	ID        string   `json:"id"`
+	Name      string   `json:"name"`
+	Realms    []string `json:"realms"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
 const clientSelect = `SELECT c.id::text, c.name, ARRAY(SELECT cr.realm::text FROM client_realms cr
-		WHERE cr.client_id = c.id ORDER BY cr.realm), c.rate_limit_per_minute, c.created_at, c.updated_at FROM clients c`
+		WHERE cr.client_id = c.id ORDER BY cr.realm), c.created_at, c.updated_at FROM clients c`
 
 func scanClient(row pgx.Row) (clientView, error) {
 	var (
 		v    clientView
 		c, u time.Time
-		rl   *int32
 	)
-	err := row.Scan(&v.ID, &v.Name, &v.Realms, &rl, &c, &u)
-	if rl != nil {
-		n := int(*rl)
-		v.RateLimitPerMinute = &n
-	}
+	err := row.Scan(&v.ID, &v.Name, &v.Realms, &c, &u)
 	v.CreatedAt, v.UpdatedAt = ts(c), ts(u)
 	if v.Realms == nil {
 		v.Realms = []string{}
@@ -341,13 +335,11 @@ func (s *Server) getClient(w http.ResponseWriter, r *http.Request, _ *auth.Princ
 type clientFields struct {
 	name               string
 	realms             []string
-	rateLimit          *int
 	setName, setRealms bool
-	setRate            bool
 }
 
 func parseClientFields(r *http.Request, create bool) (*clientFields, error) {
-	m, err := decodeObject(r, "name", "realms", "rate_limit_per_minute")
+	m, err := decodeObject(r, "name", "realms")
 	if err != nil {
 		return nil, err
 	}
@@ -379,16 +371,6 @@ func parseClientFields(r *http.Request, create bool) (*clientFields, error) {
 		}
 	} else if create {
 		fe.add("realms", "required")
-	}
-	if raw, ok := m["rate_limit_per_minute"]; ok {
-		if !isNull(raw) {
-			var n int
-			if err := json.Unmarshal(raw, &n); err != nil || n < 0 || n > 1<<30 {
-				fe.add("rate_limit_per_minute", "must be null or a non-negative integer")
-			}
-			f.rateLimit = &n
-		}
-		f.setRate = true
 	}
 	if err := fe.err(); err != nil {
 		return nil, err
@@ -424,8 +406,7 @@ func (s *Server) createClient(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	var v *clientView
 	err = db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
 		var id string
-		err := tx.QueryRow(ctx, `INSERT INTO clients (name, rate_limit_per_minute)
-			VALUES ($1, $2) RETURNING id::text`, f.name, f.rateLimit).Scan(&id)
+		err := tx.QueryRow(ctx, `INSERT INTO clients (name) VALUES ($1) RETURNING id::text`, f.name).Scan(&id)
 		if db.IsUniqueViolation(err) {
 			return errConflict
 		}
@@ -468,9 +449,8 @@ func (s *Server) patchClient(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		}
 		_, err = tx.Exec(ctx, `UPDATE clients SET
 			name = CASE WHEN $2 THEN $3 ELSE name END,
-			rate_limit_per_minute = CASE WHEN $4 THEN $5 ELSE rate_limit_per_minute END,
 			updated_at = now()
-			WHERE id = $1`, id, f.setName, f.name, f.setRate, f.rateLimit)
+			WHERE id = $1`, id, f.setName, f.name)
 		if db.IsUniqueViolation(err) {
 			return errConflict
 		}

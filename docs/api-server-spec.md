@@ -14,8 +14,9 @@ Build the ip-valet API server: one Go binary that owns the Postgres database and
 2. A database migration reproducing the schema in this spec.
 3. `spec/openapi.yaml` (OpenAPI 3.1) describing every endpoint, request and response in this spec. It is the contract third-party workers and clients build against, so it must match the server exactly.
 4. A `Dockerfile` producing a minimal, non-root image.
-5. Tests covering every item in Acceptance tests, runnable with `go test ./...` against a disposable Postgres named by `IPVALET_TEST_DATABASE_URL`.
+5. Tests covering every item in Acceptance tests, runnable with `go test ./...` against a disposable Postgres named by `IPVALET_TEST_DATABASE_URL` (in CI, where `CI` is set, a missing URL fails the tests instead of skipping them).
 6. A `README.md` in `api/` listing the environment variables and commands.
+7. `.github/workflows/ci.yml`: on every pull request, push to `main`, `api/v*` tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) when `api/`, `spec/` or the workflow changed; check DCO sign-offs on pull requests; build the image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-api` from `main` (`main`, `sha-<commit>`) and from tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check.
 
 **Definition of done**
 
@@ -37,7 +38,7 @@ Build the ip-valet API server: one Go binary that owns the Postgres database and
 | Postgres | `github.com/jackc/pgx/v5` and `pgxpool`; a dedicated connection for `LISTEN` |
 | Migrations | `github.com/pressly/goose/v3`, SQL migrations embedded with `embed` |
 | Metrics | `github.com/prometheus/client_golang` |
-| Rate limiting | `golang.org/x/time/rate` |
+| Failed-authentication throttle | `golang.org/x/time/rate` token buckets |
 | Logging | `log/slog`, JSON to stdout |
 | Postgres server | 16 or newer (needs `UNIQUE NULLS NOT DISTINCT` and `gen_random_uuid()`) |
 | Test only | `github.com/pb33f/libopenapi-validator` to check requests and responses against `spec/openapi.yaml` |
@@ -52,7 +53,7 @@ api/
 │   ├── app/                    # wiring, serve and shutdown, subcommands
 │   ├── config/                 # environment parsing and validation
 │   ├── db/                     # pool, migrations, queries, transactions, LISTEN loop
-│   ├── auth/                   # key format, hashing, authentication, rate limits
+│   ├── auth/                   # key format, hashing, authentication, failed-authentication throttle
 │   ├── rules/                  # names, TTLs, prefixes, rule evaluation, seeding, warnings
 │   ├── state/                  # applied state, desired-state ETag
 │   ├── events/                 # SSE hub
@@ -95,7 +96,9 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days (
 | `IPVALET_DEFAULT_TTL` | `30d` | Max TTL of the TTL rule seeded into each new realm |
 | `IPVALET_DEFAULT_PREFIX_V4` | `32` | Shortest IPv4 prefix length in the seeded prefix rule |
 | `IPVALET_DEFAULT_PREFIX_V6` | `64` | Shortest IPv6 prefix length in the seeded prefix rule |
-| `IPVALET_DEFAULT_RATE_LIMIT` | `0` | Requests per minute per key for clients without their own limit; `0` = off |
+| `IPVALET_AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications allowed per client network (IPv4 address or IPv6 /64) per minute before its requests are refused; `0` = off |
+| `IPVALET_TRUSTED_PROXIES` | unset | Comma-separated IPs or CIDR prefixes of reverse proxies whose `X-Forwarded-For` is believed |
+| `IPVALET_MAX_STREAMS_PER_KEY` | `4` | Open event streams allowed per key, per API instance |
 | `IPVALET_RETENTION_ENTRIES` | `90d` | Purge deleted or expired entries this long after they ended |
 | `IPVALET_RETENTION_AUDIT` | `365d` | Purge audit rows older than this |
 | `IPVALET_PURGE_INTERVAL` | `1h` | How often the purge job runs |
@@ -132,11 +135,9 @@ CREATE TABLE realms (
 
 CREATE TABLE clients (
   id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                  text NOT NULL UNIQUE,
-  rate_limit_per_minute integer CHECK (rate_limit_per_minute >= 0),
-                                        -- NULL = IPVALET_DEFAULT_RATE_LIMIT; 0 = off
-  created_at            timestamptz NOT NULL DEFAULT now(),
-  updated_at            timestamptz NOT NULL DEFAULT now()
+  name       text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE client_realms (
@@ -286,6 +287,7 @@ Every `/v1` request carries `Authorization: Bearer <key>`. Health and metrics en
 
 **Verifying a request**
 
+0. If the caller's network has spent its failed-authentication budget (below) → 429 `too_many_attempts` with `Retry-After`, without looking at the key.
 1. Missing header, wrong scheme, or a key not matching the pattern → 401 `unauthenticated`, with `WWW-Authenticate: Bearer`.
 2. If the keyid matches the environment admin key's keyid, compare against it; otherwise load the `api_keys` row by id. No row → 401.
 3. Compare `SHA-256(secret)` to the stored hash with `crypto/subtle.ConstantTimeCompare`. Mismatch → 401.
@@ -294,9 +296,15 @@ Every `/v1` request carries `Authorization: Bearer <key>`. Health and metrics en
 6. Client keys: load the client's realms. A client with no realms gets 403 `realm_not_allowed` on every call.
 7. Record `last_used_at` asynchronously, at most once a minute per key.
 
+Every 401 spends one attempt from the caller's network budget and is counted in `ipvalet_auth_failures_total` by reason (`malformed`, `unknown_key`, `wrong_secret`, `inactive`); a refused request counts as `throttled`. A 403 for the wrong key kind is not a failed authentication. A wrong secret for an existing key id is logged at warning level with the key id and client address.
+
 **Environment admin key.** At startup, parse `IPVALET_ADMIN_KEY` (or its `_FILE`) into keyid and secret hash, or take `IPVALET_ADMIN_KEY_HASH` (`<keyid>:<64 hex chars>`) directly. Hold only the keyid and hash in memory. Requests made with it have actor `admin:env` in the audit log. It cannot be listed or revoked through the API. `hash-key` reads a full key on stdin and prints `<keyid>:<hex sha256 of secret>`.
 
-**Rate limiting.** Client keys only; admin and worker keys are never limited. The limit is the client's `rate_limit_per_minute`, or `IPVALET_DEFAULT_RATE_LIMIT` when NULL; 0 means off, which is the default. Use one token bucket per key (`rate.Limit(n/60)`, burst `n`), kept in memory and evicted after 10 minutes idle. Over the limit → 429 `rate_limited` with `Retry-After` in seconds.
+**Failed-authentication throttle.** One token bucket per client network, kept in memory and evicted after 10 minutes without a failure: `rate.Limit(n/60)` with burst `n`, where `n` is `IPVALET_AUTH_FAILURES_PER_MINUTE`. A network is an IPv4 address or an IPv6 /64. Only failed authentications spend tokens; while the bucket holds less than one token, every request from that network is refused before any key lookup. Log a warning when a network's budget runs out. There are no rate limits on authenticated requests.
+
+**Client address.** The caller is the connection's peer, unless the peer is in `IPVALET_TRUSTED_PROXIES`; then read `X-Forwarded-For` from the right, skip trusted proxies, and take the first other address (IPv4-mapped addresses are unmapped). A malformed hop stops the walk at the last address vouched for. If a request carries `X-Forwarded-For` from an untrusted peer, log one warning, since every client behind that proxy would then share one budget. The address appears in access logs as `client_ip`.
+
+**Response headers.** Every response carries `X-Request-Id` and `X-Content-Type-Options: nosniff`; responses under `/v1` carry `Cache-Control: no-store` (event streams use `no-cache`).
 
 **Request context.** After authentication, handlers receive: actor string (key id or `admin:env`), key kind, client id and realms (client keys), worker id (worker keys).
 
@@ -473,7 +481,8 @@ Each API instance holds one dedicated connection running `LISTEN` on both channe
 - A notification does a non-blocking send to each subscriber, so a slow stream gets one pending wake-up, never a backlog.
 - Worker streams wake on `ipvalet_changes`.
 - Client streams wake on both channels and on their own recheck timer (`IPVALET_CLIENT_EVENTS_RECHECK`), because expiry happens by time and sends no notification.
-- On each wake-up a stream re-checks that its key is still valid and ends if it is not.
+- On each wake-up and each heartbeat a stream re-checks that its key is still valid and ends if it is not, so a revoked key loses its streams within one heartbeat.
+- A key may hold at most `IPVALET_MAX_STREAMS_PER_KEY` open streams on an instance; another is refused with 429 `too_many_streams`.
 
 **SSE format.** Set `Content-Type: text/event-stream`, `Cache-Control: no-cache`, `X-Accel-Buffering: no`, and flush after every event. Send `: ping` every `IPVALET_SSE_HEARTBEAT`. Lift the server's write and read deadlines for these routes only, with `http.ResponseController`; an expired read deadline would otherwise cancel the request context.
 
@@ -699,7 +708,7 @@ data: {"id":"…","state":"active"}
 | Resource | Routes | Fields and behaviour |
 | --- | --- | --- |
 | Realms | `GET /realms`, `POST /realms`, `GET /realms/{name}`, `DELETE /realms/{name}` | `{ name }`. POST seeds the default rules. DELETE soft-deletes the realm's live entries (one revision bump, removals recorded first) and cascades its rules, client bindings and subscriptions (bumping `subscriptions_revision` on affected workers). It needs no confirmation and returns `{ name, entries_removed, rules_deleted, subscriptions_deleted, clients_unbound, revision }`. |
-| Clients | `GET /clients`, `POST /clients`, `GET /clients/{id}`, `PATCH /clients/{id}`, `DELETE /clients/{id}` | `{ name, realms[], rate_limit_per_minute \| null }`. `realms` needs at least one existing realm. DELETE cascades the client's keys; its entries keep a NULL `client_id`. |
+| Clients | `GET /clients`, `POST /clients`, `GET /clients/{id}`, `PATCH /clients/{id}`, `DELETE /clients/{id}` | `{ name, realms[] }`. `realms` needs at least one existing realm. DELETE cascades the client's keys; its entries keep a NULL `client_id`. |
 | Workers | `GET /workers`, `POST /workers`, `GET /workers/{id}`, `PATCH /workers/{id}`, `DELETE /workers/{id}` | `{ name, label, ipv4, ipv6 }`, at least one family true. Responses add `applied_revision`, `applied_generated_at`, `subscriptions_revision`, `last_seen_at`. Changing a family bumps the revision. PATCH of families and DELETE go through the impact check. |
 | Subscriptions | `GET /workers/{id}/subscriptions`, `POST /workers/{id}/subscriptions`, `DELETE /subscriptions/{id}` | `{ realm, user, group }`, each a name or `"*"`; set only by admins. No PATCH: delete and create instead. Every change bumps the revision; DELETE goes through the impact check. |
 | Keys | `GET /keys`, `POST /keys`, `GET /keys/{id}`, `POST /keys/{id}/revoke` | POST `{ kind, client_id \| worker_id, name, expires_at? }` returns 201 with the key record and `"key": "ipv_…"`, shown only this once. List filters: `kind`, `client_id`, `worker_id`. A key record never contains the secret or its hash. |
@@ -745,7 +754,8 @@ Every error response has the same envelope; `results`, `impact` and `fields` app
 | 409 | `confirmation_required` | The impact check found affected entries (`impact`) |
 | 413 | `body_too_large` | Body over `IPVALET_MAX_BODY_BYTES` |
 | 422 | `submission_rejected` | A submission check failed (`results`) |
-| 429 | `rate_limited` | Over the key's rate limit (`Retry-After`) |
+| 429 | `too_many_attempts` | The caller's network failed authentication too often (`Retry-After`) |
+| 429 | `too_many_streams` | The key already holds the maximum number of open event streams |
 | 500 | `internal` | Anything unexpected |
 | 503 | `unavailable` | Database unreachable, or the server is shutting down |
 
@@ -796,9 +806,10 @@ Expiry itself needs no job: desired state and applied state both compare `expire
 | `ipvalet_worker_rejections` | gauge | `worker` |
 | `ipvalet_worker_streams` | gauge | `worker` |
 | `ipvalet_client_streams` | gauge | none |
+| `ipvalet_auth_failures_total` | counter | `reason` (`malformed`, `unknown_key`, `wrong_secret`, `inactive`, `throttled`) |
 | `ipvalet_entries_live` | gauge | `realm` |
 
-**Logging.** `slog` JSON to stdout. One access line per request: method, route, status, duration, actor, request id (`/healthz` and `/readyz` at debug level). Never log keys, the `Authorization` header or request bodies.
+**Logging.** `slog` JSON to stdout. One access line per request: method, route, status, duration, actor, client address, request id (`/healthz` and `/readyz` at debug level). Never log keys, the `Authorization` header or request bodies.
 
 **Shutdown.** On SIGTERM or SIGINT:
 
@@ -816,7 +827,10 @@ Each item is at least one automated test against a real Postgres. Unit tests for
 - [x] `create-admin-key` prints a working key, and the database holds only its hash.
 - [x] `IPVALET_ADMIN_KEY`, `_FILE` and `_HASH` each authenticate; setting two of them fails startup.
 - [x] Revoking a key takes effect on the very next request.
-- [x] Rate limiting is off by default; with a limit set, the request over it returns 429 with `Retry-After`.
+- [x] After `IPVALET_AUTH_FAILURES_PER_MINUTE` failures, a network's requests (valid keys included) get 429 `too_many_attempts` with `Retry-After`; other networks, successful requests and wrong-kind 403s are unaffected; IPv6 is counted per /64; failures appear in metrics by reason.
+- [x] `X-Forwarded-For` is believed only from a trusted proxy, and prepending addresses does not escape the throttle.
+- [x] A key cannot open more than `IPVALET_MAX_STREAMS_PER_KEY` event streams; revoking a key ends its streams within a heartbeat.
+- [x] Responses carrying a new key are `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
 
 **Normalisation and rules**
 
@@ -890,7 +904,10 @@ The design doc did not settle these; this spec picked a value so the server coul
 | Deleting a client | Its keys are deleted; its entries remain with no client | Entries belong to users, not to the client that sent them |
 | Impact check | Confirmation always enforces: remove entries that fail IP or prefix rules, remove the least recently submitted prefixes over a cap, shorten entries over a TTL rule; unrouted entries stay | No entry is ever left failing a rule; routing is not a rule, and keeping unrouted entries lets a re-added subscription restore them |
 | TTL on existing entries | Compared by lifetime left, not the TTL originally requested | An entry near the end of its TTL is not shortened for no reason |
-| Rate limits | Client keys only | Workers and admins are trusted and few |
+| Rate limits | None for now | To be revisited; floods of bad keys are handled by the failed-authentication throttle |
+| Failed-authentication throttle | 10 failures a minute per IPv4 address or IPv6 /64, in memory per instance; refused requests are not checked | Keeps floods off the database; per-key lockouts would let anyone who knows a key id lock out its owner |
+| Client address | `X-Forwarded-For` only from `IPVALET_TRUSTED_PROXIES` | A client must not be able to choose its own address |
+| Event streams per key | 4 per instance; keys re-checked every heartbeat | One key cannot multiply the work every change causes, and revocation reaches open streams |
 | Client event stream | Baseline of entries live or ended in the last 24 h; recheck every 30 s | Catches expiries without a notification |
 | Metrics | Separate listener on `:9090` | Not reachable through the public proxy |
 | Status reports | Not audited; logged at debug level | They arrive constantly and change no configuration |

@@ -70,6 +70,9 @@ func (s *Server) beginStream() (context.Context, func(), error) {
 	return s.streams, s.streamWG.Done, nil
 }
 
+var errTooManyStreams = &apiError{Status: http.StatusTooManyRequests, Code: "too_many_streams",
+	Message: "this key already has the maximum number of open event streams"}
+
 type changedEvent struct {
 	Revision int64 `json:"revision"`
 }
@@ -83,7 +86,10 @@ func (s *Server) workerEvents(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		return err
 	}
 	defer done()
-	sub := s.Hub.Subscribe(events.KindWorker, p.WorkerID)
+	sub, ok := s.Hub.Subscribe(events.KindWorker, p.WorkerID, p.KeyID, s.Config.MaxStreamsPerKey)
+	if !ok {
+		return errTooManyStreams
+	}
 	defer s.Hub.Unsubscribe(sub)
 
 	ctx := r.Context()
@@ -118,6 +124,10 @@ func (s *Server) workerEvents(w http.ResponseWriter, r *http.Request, p *auth.Pr
 				return nil
 			}
 		case <-hb.C:
+			// A revoked or expired key loses its stream within one heartbeat.
+			if ok, err := s.Auth.StillValid(ctx, p); err == nil && !ok {
+				return nil
+			}
 			if err := sse.ping(); err != nil {
 				return nil
 			}
@@ -170,7 +180,10 @@ func (s *Server) clientEvents(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		return err
 	}
 	defer done()
-	sub := s.Hub.Subscribe(events.KindClient, "")
+	sub, ok := s.Hub.Subscribe(events.KindClient, "", p.KeyID, s.Config.MaxStreamsPerKey)
+	if !ok {
+		return errTooManyStreams
+	}
 	defer s.Hub.Unsubscribe(sub)
 
 	sse, err := startSSE(w)
@@ -192,6 +205,9 @@ func (s *Server) clientEvents(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		case <-stop.Done():
 			return nil
 		case <-hb.C:
+			if ok, err := s.Auth.StillValid(ctx, p); err == nil && !ok {
+				return nil
+			}
 			if err := sse.ping(); err != nil {
 				return nil
 			}

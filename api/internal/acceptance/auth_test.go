@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -226,50 +227,78 @@ func TestRevocationIsImmediate(t *testing.T) {
 	}
 }
 
-func TestRateLimiting(t *testing.T) {
+func TestFailedAuthenticationThrottle(t *testing.T) {
 	t.Parallel()
-	h := testutil.New(t, nil)
-	s := h.Basic("authentik")
-
-	// Off by default.
-	for i := 0; i < 60; i++ {
-		if r := h.Do("GET", "/v1/entries", s.ClientKey, nil); r.Status != 200 {
-			t.Fatalf("request %d with no limit: %d", i, r.Status)
-		}
+	// The test server's peer is 127.0.0.1; trusting it lets X-Forwarded-For
+	// name the client, as behind the reverse proxy.
+	h := testutil.New(t, map[string]string{"IPVALET_AUTH_FAILURES_PER_MINUTE": "3", "IPVALET_TRUSTED_PROXIES": "127.0.0.1"})
+	s := h.Basic("r")
+	bad, _ := auth.NewKey()
+	from := func(key, ip string) testutil.Resp {
+		return h.Do("GET", "/v1/entries", key, nil, "X-Forwarded-For", ip)
 	}
-
-	h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"rate_limit_per_minute": 3})
-	limited := h.ClientKey(s.ClientID)
 	for i := 0; i < 3; i++ {
-		if r := h.Do("GET", "/v1/entries", limited, nil); r.Status != 200 {
-			t.Fatalf("request %d under the limit: %d", i, r.Status)
+		if r := from(bad.String(), "198.51.100.7"); r.Status != 401 {
+			t.Fatalf("failure %d: %d", i, r.Status)
 		}
 	}
-	r := h.Do("GET", "/v1/entries", limited, nil)
-	if r.Status != 429 || r.Code(t) != "rate_limited" {
-		t.Fatalf("over the limit: %d %s", r.Status, r.Body)
+	// The budget is spent: even a valid key from that network is refused unchecked.
+	r := from(s.ClientKey, "198.51.100.7")
+	if r.Status != 429 || r.Code(t) != "too_many_attempts" {
+		t.Fatalf("after the budget: %d %s", r.Status, r.Body)
 	}
-	ra, err := strconv.Atoi(r.Header.Get("Retry-After"))
-	if err != nil || ra < 1 || ra > 60 {
+	if ra, err := strconv.Atoi(r.Header.Get("Retry-After")); err != nil || ra < 1 || ra > 20 {
 		t.Fatalf("Retry-After = %q", r.Header.Get("Retry-After"))
 	}
-	// Workers and admins are never limited.
+	// Prepending an address does not escape: the rightmost untrusted hop counts.
+	if r := h.Do("GET", "/v1/entries", s.ClientKey, nil, "X-Forwarded-For", "203.0.113.50, 198.51.100.7"); r.Status != 429 {
+		t.Fatalf("spoofed chain: %d", r.Status)
+	}
+	// Other networks are unaffected, and successes never spend the budget.
 	for i := 0; i < 10; i++ {
-		h.Must(200, "GET", "/v1/worker/desired-state", s.WorkerKey, nil)
-		h.Admin(200, "GET", "/v1/admin/realms", nil)
+		if r := from(s.ClientKey, "198.51.100.8"); r.Status != 200 {
+			t.Fatalf("other network: %d", r.Status)
+		}
+	}
+	// A valid key on the wrong route is 403 and is not a failed authentication.
+	for i := 0; i < 5; i++ {
+		if r := h.Do("GET", "/v1/admin/realms", s.ClientKey, nil, "X-Forwarded-For", "198.51.100.9"); r.Status != 403 {
+			t.Fatalf("wrong kind: %d", r.Status)
+		}
+	}
+	if r := from(s.ClientKey, "198.51.100.9"); r.Status != 200 {
+		t.Fatalf("after 403s: %d", r.Status)
+	}
+	// IPv6 is counted per /64, so one host cannot rotate addresses to escape.
+	for _, ip := range []string{"2001:db8:1::1", "2001:db8:1::2", "2001:db8:1::3"} {
+		from(bad.String(), ip)
+	}
+	if r := from(s.ClientKey, "2001:db8:1::99"); r.Status != 429 {
+		t.Fatalf("same /64: %d", r.Status)
+	}
+	if r := from(s.ClientKey, "2001:db8:2::1"); r.Status != 200 {
+		t.Fatalf("another /64: %d", r.Status)
 	}
 
-	// IPVALET_DEFAULT_RATE_LIMIT applies to clients without their own limit.
-	h2 := testutil.New(t, map[string]string{"IPVALET_DEFAULT_RATE_LIMIT": "2"})
-	s2 := h2.Basic("authentik")
-	h2.Must(200, "GET", "/v1/entries", s2.ClientKey, nil)
-	h2.Must(200, "GET", "/v1/entries", s2.ClientKey, nil)
-	if r := h2.Do("GET", "/v1/entries", s2.ClientKey, nil); r.Status != 429 {
-		t.Fatalf("default limit: %d", r.Status)
+	// Failures are counted in metrics by reason.
+	rec := httptest.NewRecorder()
+	h.Inst.App.MetricsHandler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	for _, want := range []string{`ipvalet_auth_failures_total{reason="unknown_key"} 6`, `ipvalet_auth_failures_total{reason="throttled"} 3`} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("metrics lack %s", want)
+		}
 	}
-	// A client limit of 0 turns it off.
-	h2.Admin(200, "PATCH", "/v1/admin/clients/"+s2.ClientID, map[string]any{"rate_limit_per_minute": 0})
-	for i := 0; i < 5; i++ {
-		h2.Must(200, "GET", "/v1/entries", s2.ClientKey, nil)
+
+	// Without a trusted proxy, X-Forwarded-For is ignored: every request here
+	// comes from 127.0.0.1, whatever the header says.
+	h2 := testutil.New(t, map[string]string{"IPVALET_AUTH_FAILURES_PER_MINUTE": "3"})
+	s2 := h2.Basic("r")
+	for i, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
+		if r := h2.Do("GET", "/v1/entries", bad.String(), nil, "X-Forwarded-For", ip); r.Status != 401 {
+			t.Fatalf("untrusted failure %d: %d", i, r.Status)
+		}
+	}
+	if r := h2.Do("GET", "/v1/entries", s2.ClientKey, nil, "X-Forwarded-For", "192.0.2.4"); r.Status != 429 {
+		t.Fatalf("an untrusted X-Forwarded-For escaped the throttle: %d", r.Status)
 	}
 }

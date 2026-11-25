@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PatrickH298/ip-valet/api/internal/auth"
 	"github.com/PatrickH298/ip-valet/api/internal/testutil"
 )
 
@@ -541,6 +542,42 @@ func TestStatusReportLimits(t *testing.T) {
 	for _, bad := range []map[string]any{report(201, 10), report(1, 201)} {
 		if r := h.Do("POST", "/v1/worker/status", s.WorkerKey, bad); r.Status != 400 || r.Code(t) != "invalid_request" {
 			t.Fatalf("over the limits: %d %s", r.Status, r.Body)
+		}
+	}
+}
+
+func TestEventStreamLimits(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, map[string]string{"IPVALET_MAX_STREAMS_PER_KEY": "2", "IPVALET_SSE_HEARTBEAT": "200ms"})
+	s := h.Basic("r")
+	first, _ := openSSE(t, h.Inst.URL, "/v1/worker/events", s.WorkerKey)
+	openSSE(t, h.Inst.URL, "/v1/worker/events", s.WorkerKey)
+	nextEvent(t, first, 2*time.Second)
+
+	// A third stream on the same key is refused; another key for the worker is not.
+	if r := h.Do("GET", "/v1/worker/events", s.WorkerKey, nil); r.Status != 429 || r.Code(t) != "too_many_streams" {
+		t.Fatalf("third stream: %d %s", r.Status, r.Body)
+	}
+	openSSE(t, h.Inst.URL, "/v1/worker/events", h.WorkerKey(s.WorkerID))
+	client, _ := openSSE(t, h.Inst.URL, "/v1/events", s.ClientKey)
+
+	// Revoking a key ends its open streams within a heartbeat, with no change needed.
+	wk, _ := auth.ParseKey(s.WorkerKey)
+	ck, _ := auth.ParseKey(s.ClientKey)
+	h.Admin(200, "POST", "/v1/admin/keys/"+wk.ID+"/revoke", nil)
+	h.Admin(200, "POST", "/v1/admin/keys/"+ck.ID+"/revoke", nil)
+	for name, ch := range map[string]<-chan sseEvent{"worker": first, "client": client} {
+		deadline := time.After(2 * time.Second)
+	drain:
+		for {
+			select {
+			case _, ok := <-ch:
+				if !ok {
+					break drain
+				}
+			case <-deadline:
+				t.Fatalf("%s stream still open after its key was revoked", name)
+			}
 		}
 	}
 }

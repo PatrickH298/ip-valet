@@ -7,13 +7,13 @@ import (
 	"log/slog"
 	"math"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"golang.org/x/time/rate"
 )
 
 // Principal is the authenticated caller, passed to handlers.
@@ -23,9 +23,8 @@ type Principal struct {
 	KeyID string
 
 	// Client keys.
-	ClientID  string
-	Realms    []string
-	RateLimit *int // nil = IPVALET_DEFAULT_RATE_LIMIT
+	ClientID string
+	Realms   []string
 
 	// Worker keys.
 	WorkerID string
@@ -57,54 +56,91 @@ var (
 	errNoRealms        = &Error{Status: http.StatusForbidden, Code: "realm_not_allowed", Message: "this client is not bound to any realm"}
 )
 
+// Reasons a request failed authentication, for metrics.
+const (
+	FailMalformed   = "malformed"    // no bearer key, or not in the key format
+	FailUnknownKey  = "unknown_key"  // no key with that id
+	FailWrongSecret = "wrong_secret" // the key id exists, the secret does not match
+	FailInactive    = "inactive"     // revoked or expired
+	FailThrottled   = "throttled"    // refused unchecked: too many recent failures from this network
+)
+
 // Authenticator verifies bearer keys against the database and the
-// environment admin key, and applies per-key rate limits to client keys.
+// environment admin key, and throttles networks that keep failing.
 type Authenticator struct {
-	pool             *pgxpool.Pool
-	envKeyID         string
-	envKeyHash       []byte
-	defaultRateLimit int
-	log              *slog.Logger
+	pool       *pgxpool.Pool
+	envKeyID   string
+	envKeyHash []byte
+	log        *slog.Logger
+	throttle   *FailureThrottle
+
+	// OnFailure, if set, is called with a Fail* reason for every refused request.
+	OnFailure func(reason string)
 
 	touchMu sync.Mutex
 	touched map[string]time.Time
 	touchCh chan string
-
-	limits *limiters
 }
 
 // NewAuthenticator builds an authenticator. envKeyID may be empty.
-func NewAuthenticator(pool *pgxpool.Pool, envKeyID string, envKeyHash []byte, defaultRateLimit int, log *slog.Logger) *Authenticator {
+// failuresPerMinute is the failed-authentication budget per client network
+// (0 disables the throttle).
+func NewAuthenticator(pool *pgxpool.Pool, envKeyID string, envKeyHash []byte, failuresPerMinute int, log *slog.Logger) *Authenticator {
 	return &Authenticator{
-		pool:             pool,
-		envKeyID:         envKeyID,
-		envKeyHash:       envKeyHash,
-		defaultRateLimit: defaultRateLimit,
-		log:              log,
-		touched:          map[string]time.Time{},
-		touchCh:          make(chan string, 256),
-		limits:           &limiters{m: map[string]*bucket{}},
+		pool:       pool,
+		envKeyID:   envKeyID,
+		envKeyHash: envKeyHash,
+		log:        log,
+		throttle:   NewFailureThrottle(failuresPerMinute),
+		touched:    map[string]time.Time{},
+		touchCh:    make(chan string, 256),
 	}
 }
 
 // EnvKeyID returns the environment admin key's id, or "".
 func (a *Authenticator) EnvKeyID() string { return a.envKeyID }
 
+func (a *Authenticator) fail(clientIP netip.Addr, reason string, keyID string) error {
+	if a.OnFailure != nil {
+		a.OnFailure(reason)
+	}
+	if reason == FailWrongSecret {
+		// Key ids are not secret, but a wrong secret for a real key id is worth seeing.
+		a.log.Warn("authentication failed: wrong secret for an existing key", "key_id", keyID, "client_ip", clientIP.String())
+	}
+	if a.throttle.Fail(clientIP) {
+		a.log.Warn("throttling a network after repeated authentication failures",
+			"network", NetworkOf(clientIP).String(), "client_ip", clientIP.String())
+	}
+	return errUnauthenticated
+}
+
 // Authenticate verifies the Authorization header and that the key's kind is
-// the one the route requires. A non-*Error error means the database failed.
-func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind string) (*Principal, error) {
+// the one the route requires. clientIP is the caller's address, used to
+// throttle networks that fail authentication repeatedly: once a network's
+// budget is spent, its requests are refused before any key is looked up.
+// A non-*Error error means the database failed.
+func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind string, clientIP netip.Addr) (*Principal, error) {
+	if wait, blocked := a.throttle.Blocked(clientIP); blocked {
+		if a.OnFailure != nil {
+			a.OnFailure(FailThrottled)
+		}
+		return nil, &Error{Status: http.StatusTooManyRequests, Code: "too_many_attempts",
+			Message:    "too many failed authentication attempts from this network; retry later",
+			RetryAfter: max(1, int(math.Ceil(wait.Seconds())))}
+	}
 	scheme, token, ok := strings.Cut(header, " ")
 	if !ok || !strings.EqualFold(scheme, "Bearer") {
-		return nil, errUnauthenticated
+		return nil, a.fail(clientIP, FailMalformed, "")
 	}
 	key, err := ParseKey(strings.TrimSpace(token))
 	if err != nil {
-		return nil, errUnauthenticated
+		return nil, a.fail(clientIP, FailMalformed, "")
 	}
 
 	if a.envKeyID != "" && key.ID == a.envKeyID {
 		if subtle.ConstantTimeCompare(key.Hash(), a.envKeyHash) != 1 {
-			return nil, errUnauthenticated
+			return nil, a.fail(clientIP, FailWrongSecret, key.ID)
 		}
 		if requiredKind != KindAdmin {
 			return nil, errForbidden
@@ -117,29 +153,27 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 		hash               []byte
 		clientID, workerID *string
 		active             bool
-		rateLimit          *int32
 		realms             []string
 	)
 	err = a.pool.QueryRow(ctx, `
 		SELECT k.kind, k.secret_hash, k.client_id::text, k.worker_id::text,
 		       (k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())),
-		       c.rate_limit_per_minute,
 		       ARRAY(SELECT cr.realm::text FROM client_realms cr
 		             WHERE cr.client_id = k.client_id ORDER BY cr.realm)
-		FROM api_keys k LEFT JOIN clients c ON c.id = k.client_id
+		FROM api_keys k
 		WHERE k.id = $1`, key.ID).
-		Scan(&p.Kind, &hash, &clientID, &workerID, &active, &rateLimit, &realms)
+		Scan(&p.Kind, &hash, &clientID, &workerID, &active, &realms)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, errUnauthenticated
+		return nil, a.fail(clientIP, FailUnknownKey, key.ID)
 	}
 	if err != nil {
 		return nil, err
 	}
 	if subtle.ConstantTimeCompare(key.Hash(), hash) != 1 {
-		return nil, errUnauthenticated
+		return nil, a.fail(clientIP, FailWrongSecret, key.ID)
 	}
 	if !active {
-		return nil, errUnauthenticated
+		return nil, a.fail(clientIP, FailInactive, key.ID)
 	}
 	if p.Kind != requiredKind {
 		return nil, errForbidden
@@ -149,15 +183,8 @@ func (a *Authenticator) Authenticate(ctx context.Context, header, requiredKind s
 	case KindClient:
 		p.ClientID = *clientID
 		p.Realms = realms
-		if rateLimit != nil {
-			n := int(*rateLimit)
-			p.RateLimit = &n
-		}
 		if len(p.Realms) == 0 {
 			return nil, errNoRealms
-		}
-		if err := a.rateLimit(p); err != nil {
-			return nil, err
 		}
 	case KindWorker:
 		p.WorkerID = *workerID
@@ -177,26 +204,6 @@ func (a *Authenticator) StillValid(ctx context.Context, p *Principal) (bool, err
 	return ok, err
 }
 
-func (a *Authenticator) rateLimit(p *Principal) error {
-	n := a.defaultRateLimit
-	if p.RateLimit != nil {
-		n = *p.RateLimit
-	}
-	if n <= 0 {
-		return nil
-	}
-	ok, wait := a.limits.allow(p.KeyID, n, time.Now())
-	if ok {
-		return nil
-	}
-	secs := int(math.Ceil(wait.Seconds()))
-	if secs < 1 {
-		secs = 1
-	}
-	return &Error{Status: http.StatusTooManyRequests, Code: "rate_limited",
-		Message: "rate limit exceeded", RetryAfter: secs}
-}
-
 // touch queues a last_used_at update at most once a minute per key.
 func (a *Authenticator) touch(id string) {
 	now := time.Now()
@@ -214,7 +221,7 @@ func (a *Authenticator) touch(id string) {
 	}
 }
 
-// Run writes last_used_at updates and evicts idle rate limiters until ctx ends.
+// Run writes last_used_at updates and evicts idle throttle state until ctx ends.
 func (a *Authenticator) Run(ctx context.Context) {
 	tick := time.NewTicker(time.Minute)
 	defer tick.Stop()
@@ -230,7 +237,7 @@ func (a *Authenticator) Run(ctx context.Context) {
 				a.log.Warn("recording last_used_at failed", "key_id", id, "error", err.Error())
 			}
 		case now := <-tick.C:
-			a.limits.evict(now, 10*time.Minute)
+			a.throttle.Evict(now)
 			a.touchMu.Lock()
 			for id, t := range a.touched {
 				if now.Sub(t) > time.Minute {
@@ -238,48 +245,6 @@ func (a *Authenticator) Run(ctx context.Context) {
 				}
 			}
 			a.touchMu.Unlock()
-		}
-	}
-}
-
-type bucket struct {
-	lim  *rate.Limiter
-	n    int
-	last time.Time
-}
-
-type limiters struct {
-	mu sync.Mutex
-	m  map[string]*bucket
-}
-
-// allow takes one token from key's bucket (n per minute, burst n).
-func (l *limiters) allow(key string, n int, now time.Time) (bool, time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	b := l.m[key]
-	if b == nil || b.n != n {
-		b = &bucket{lim: rate.NewLimiter(rate.Limit(float64(n)/60), n), n: n}
-		l.m[key] = b
-	}
-	b.last = now
-	r := b.lim.ReserveN(now, 1)
-	if !r.OK() {
-		return false, time.Minute
-	}
-	if d := r.DelayFrom(now); d > 0 {
-		r.CancelAt(now)
-		return false, d
-	}
-	return true, 0
-}
-
-func (l *limiters) evict(now time.Time, idle time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for k, b := range l.m {
-		if now.Sub(b.last) > idle {
-			delete(l.m, k)
 		}
 	}
 }

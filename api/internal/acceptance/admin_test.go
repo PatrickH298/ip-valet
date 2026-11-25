@@ -306,7 +306,15 @@ func TestKeySecretShownOnce(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)
 	s := h.Basic("r")
-	created := h.Admin(201, "POST", "/v1/admin/keys", map[string]any{"kind": "client", "client_id": s.ClientID, "name": "once"})
+	cr := h.Do("POST", "/v1/admin/keys", h.AdminKey, map[string]any{"kind": "client", "client_id": s.ClientID, "name": "once"})
+	if cr.Status != 201 {
+		t.Fatalf("create key: %d %s", cr.Status, cr.Body)
+	}
+	// No cache may keep the response that carries the secret.
+	if cr.Header.Get("Cache-Control") != "no-store" || cr.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("headers: %v", cr.Header)
+	}
+	created := cr.JSON(t)
 	full := created["key"].(string)
 	k, err := auth.ParseKey(full)
 	if err != nil || created["id"] != k.ID {
@@ -389,8 +397,8 @@ func TestAdminCRUD(t *testing.T) {
 
 	// Client update and delete: keys go, entries stay with no client.
 	id := firstEntryID(submitOK(h, s.ClientKey, sub("p", "8.8.8.8", "1d", "g")))
-	upd := h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"name": "renamed", "rate_limit_per_minute": 100})
-	if upd["name"] != "renamed" || upd["rate_limit_per_minute"].(float64) != 100 {
+	upd := h.Admin(200, "PATCH", "/v1/admin/clients/"+s.ClientID, map[string]any{"name": "renamed"})
+	if upd["name"] != "renamed" {
 		t.Fatalf("patched = %v", upd)
 	}
 	h.Admin(200, "DELETE", "/v1/admin/clients/"+s.ClientID, nil)

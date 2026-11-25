@@ -18,6 +18,7 @@ type Sub struct {
 	C        chan struct{}
 	kind     string
 	workerID string
+	keyID    string
 }
 
 // Hub fans notifications out to registered streams without blocking:
@@ -31,13 +32,24 @@ type Hub struct {
 // NewHub returns an empty hub.
 func NewHub() *Hub { return &Hub{subs: map[*Sub]struct{}{}} }
 
-// Subscribe registers a stream. workerID is set for worker streams.
-func (h *Hub) Subscribe(kind, workerID string) *Sub {
-	s := &Sub{C: make(chan struct{}, 1), kind: kind, workerID: workerID}
+// Subscribe registers a stream opened with keyID. workerID is set for worker
+// streams. It refuses (false) once keyID already holds maxPerKey streams on
+// this instance, so one key cannot multiply the work every change causes.
+func (h *Hub) Subscribe(kind, workerID, keyID string, maxPerKey int) (*Sub, bool) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for s := range h.subs {
+		if s.keyID == keyID {
+			n++
+		}
+	}
+	if n >= maxPerKey {
+		return nil, false
+	}
+	s := &Sub{C: make(chan struct{}, 1), kind: kind, workerID: workerID, keyID: keyID}
 	h.subs[s] = struct{}{}
-	h.mu.Unlock()
-	return s
+	return s, true
 }
 
 // Unsubscribe removes a stream.

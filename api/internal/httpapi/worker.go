@@ -97,7 +97,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	h.Set("IPValet-Revision", fmt.Sprint(rev))
 	h.Set("IPValet-Generated-At", gen)
 	h.Set("ETag", etag)
-	h.Set("Cache-Control", "no-cache")
+	h.Set("Cache-Control", "no-store")
 	if etagMatches(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return nil

@@ -19,12 +19,10 @@ CREATE TABLE realms (
 );
 
 CREATE TABLE clients (
-  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name                  text NOT NULL UNIQUE,
-  rate_limit_per_minute integer CHECK (rate_limit_per_minute >= 0),
-                                        -- NULL = IPVALET_DEFAULT_RATE_LIMIT; 0 = off
-  created_at            timestamptz NOT NULL DEFAULT now(),
-  updated_at            timestamptz NOT NULL DEFAULT now()
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE client_realms (

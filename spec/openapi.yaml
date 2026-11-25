@@ -15,6 +15,13 @@ info:
     malformed, unknown, revoked or expired key is `401 unauthenticated`; a key
     of the wrong kind is `403 forbidden`.
 
+    **Failed authentication.** A network (an IPv4 address, or an IPv6 /64)
+    that fails authentication too often, by default 10 times a minute, has
+    its requests refused unchecked with 429 `too_many_attempts` and
+    `Retry-After` until its budget refills. Successful requests never count.
+    Behind a reverse proxy the server reads the caller's address from
+    `X-Forwarded-For` only when the proxy is configured as trusted.
+
     **Workers.** An admin registers each worker with a name, a label (the
     only worker field clients see), the address families it applies and its
     subscriptions: (realm, user, group) selectors, each a name or `*`. An
@@ -30,7 +37,8 @@ info:
     Durations use the TTL syntax: a positive integer with unit `s`, `m`, `h`
     or `d` (at most `3650d`), or `unlimited`. Unknown body fields and unknown
     query parameters are `400 invalid_request`. Every response carries
-    `X-Request-Id`.
+    `X-Request-Id` and `X-Content-Type-Options: nosniff`; responses under
+    `/v1` carry `Cache-Control: no-store` (event streams: `no-cache`).
 
     **Lists** take `limit` (default 100, max 1000) and an opaque `cursor`, and
     return `{ "items": [...], "next_cursor": "..." | null }`.
@@ -166,7 +174,7 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SubmissionRejected" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -199,7 +207,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -240,7 +248,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -264,7 +272,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -285,7 +293,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -309,8 +317,10 @@ paths:
         ```
 
         A `: ping` comment is sent every 20 s by default. The stream ends when
-        the server shuts down or the key is revoked; reconnect and re-read
-        entries as needed.
+        the server shuts down, or within one heartbeat of the key being
+        revoked or expiring; reconnect and re-read entries as needed. Each key
+        may hold a limited number of open streams (4 by default) per API
+        instance; beyond that the request is 429 `too_many_streams`.
       security: [{ clientKey: [] }]
       responses:
         "200":
@@ -328,7 +338,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
-        "429": { $ref: "#/components/responses/RateLimited" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -380,6 +390,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -402,7 +413,10 @@ paths:
         ```
 
         A `: ping` comment is sent every 20 s by default. The stream ends when
-        the server shuts down or the key is revoked; reconnect with backoff.
+        the server shuts down, or within one heartbeat of the key being
+        revoked or expiring; reconnect with backoff. Each key may hold a
+        limited number of open streams (4 by default) per API instance;
+        beyond that the request is 429 `too_many_streams`.
       security: [{ workerKey: [] }]
       parameters:
         - name: Last-Event-ID
@@ -426,6 +440,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -469,6 +484,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -499,6 +515,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -537,6 +554,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -563,6 +581,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -592,6 +611,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -626,6 +646,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -666,6 +687,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -714,6 +736,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -750,6 +773,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -774,6 +798,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -804,6 +829,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -829,6 +855,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -852,6 +879,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     patch:
@@ -879,6 +907,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -899,6 +928,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -929,6 +959,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -954,6 +985,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -977,6 +1009,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     patch:
@@ -1018,6 +1051,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -1042,6 +1076,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1073,6 +1108,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -1105,6 +1141,7 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1133,6 +1170,7 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/ConfirmationRequired" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1156,6 +1194,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1181,6 +1220,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1221,6 +1261,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     post:
@@ -1255,6 +1296,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1278,6 +1320,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1305,6 +1348,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1349,6 +1393,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1372,6 +1417,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
     delete:
@@ -1391,6 +1437,7 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1438,6 +1485,7 @@ paths:
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
         "500": { $ref: "#/components/responses/Internal" }
         "503": { $ref: "#/components/responses/Unavailable" }
 
@@ -1604,8 +1652,13 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
-    RateLimited:
-      description: "`rate_limited`: over the client's per-key rate limit."
+    TooManyRequests:
+      description: |
+        `too_many_attempts`: the caller's network has failed authentication
+        too often (by default 10 times a minute; IPv6 is counted per /64), so
+        its requests are refused unchecked until `Retry-After` passes. Or, on
+        an event stream, `too_many_streams`: the key already holds the
+        maximum number of open streams.
       headers:
         X-Request-Id: { $ref: "#/components/headers/RequestId" }
         Retry-After: { $ref: "#/components/headers/RetryAfter" }
@@ -1714,7 +1767,8 @@ components:
         - confirmation_required
         - body_too_large
         - submission_rejected
-        - rate_limited
+        - too_many_attempts
+        - too_many_streams
         - internal
         - unavailable
     SubmissionResultCode:
@@ -2080,17 +2134,13 @@ components:
       description: |
         A client may act on any user and group in its realms; what it may
         register there is limited by the realms' rules.
-      required: [id, name, realms, rate_limit_per_minute, created_at, updated_at]
+      required: [id, name, realms, created_at, updated_at]
       properties:
         id: { $ref: "#/components/schemas/UUID" }
         name: { type: string, minLength: 1, maxLength: 128 }
         realms:
           type: array
           items: { $ref: "#/components/schemas/RealmName" }
-        rate_limit_per_minute:
-          type: [integer, "null"]
-          minimum: 0
-          description: Requests per minute per key. Null uses IPVALET_DEFAULT_RATE_LIMIT; 0 turns limiting off.
         created_at: { $ref: "#/components/schemas/Timestamp" }
         updated_at: { $ref: "#/components/schemas/Timestamp" }
     ClientCreate:
@@ -2104,7 +2154,6 @@ components:
           minItems: 1
           description: Existing realms.
           items: { $ref: "#/components/schemas/RealmName" }
-        rate_limit_per_minute: { type: [integer, "null"], minimum: 0 }
     ClientPatch:
       type: object
       additionalProperties: false
@@ -2114,7 +2163,6 @@ components:
           type: array
           minItems: 1
           items: { $ref: "#/components/schemas/RealmName" }
-        rate_limit_per_minute: { type: [integer, "null"], minimum: 0 }
     ClientMutation:
       allOf:
         - $ref: "#/components/schemas/Client"

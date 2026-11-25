@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -25,10 +26,14 @@ type Config struct {
 	AdminKeyID   string
 	AdminKeyHash []byte
 
-	DefaultTTL       time.Duration
-	DefaultPrefixV4  int
-	DefaultPrefixV6  int
-	DefaultRateLimit int
+	DefaultTTL      time.Duration
+	DefaultPrefixV4 int
+	DefaultPrefixV6 int
+
+	// Abuse protection.
+	AuthFailuresPerMinute int            // failed-authentication budget per client network; 0 = off
+	TrustedProxies        []netip.Prefix // peers whose X-Forwarded-For is believed
+	MaxStreamsPerKey      int            // concurrent event streams per key, per instance
 
 	RetentionEntries    time.Duration
 	RetentionAudit      time.Duration
@@ -164,7 +169,20 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 	}
 	c.DefaultPrefixV4 = l.intRange("IPVALET_DEFAULT_PREFIX_V4", "32", 0, 32)
 	c.DefaultPrefixV6 = l.intRange("IPVALET_DEFAULT_PREFIX_V6", "64", 0, 128)
-	c.DefaultRateLimit = l.intRange("IPVALET_DEFAULT_RATE_LIMIT", "0", 0, 1<<30)
+	c.AuthFailuresPerMinute = l.intRange("IPVALET_AUTH_FAILURES_PER_MINUTE", "10", 0, 100000)
+	c.MaxStreamsPerKey = l.intRange("IPVALET_MAX_STREAMS_PER_KEY", "4", 1, 10000)
+	for _, f := range strings.Split(l.raw("IPVALET_TRUSTED_PROXIES", ""), ",") {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		p, err := ParseNet(f)
+		if err != nil {
+			l.fail("IPVALET_TRUSTED_PROXIES", "%q is not an IP address or CIDR prefix", f)
+			continue
+		}
+		c.TrustedProxies = append(c.TrustedProxies, p)
+	}
 	c.RetentionEntries = l.positiveDuration("IPVALET_RETENTION_ENTRIES", "90d")
 	c.RetentionAudit = l.positiveDuration("IPVALET_RETENTION_AUDIT", "365d")
 	c.PurgeInterval = l.positiveDuration("IPVALET_PURGE_INTERVAL", "1h")
@@ -189,6 +207,26 @@ func Load(getenv Getenv, read ReadFile) (Config, error) {
 		return Config{}, errors.Join(l.errs...)
 	}
 	return c, nil
+}
+
+// ParseNet parses an IP address (as a single-address prefix) or a CIDR prefix.
+func ParseNet(s string) (netip.Prefix, error) {
+	if strings.Contains(s, "/") {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			return netip.Prefix{}, err
+		}
+		if p.Addr().Is4In6() {
+			p = netip.PrefixFrom(p.Addr().Unmap(), max(p.Bits()-96, 0))
+		}
+		return p.Masked(), nil
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, err
+	}
+	a = a.Unmap().WithZone("")
+	return netip.PrefixFrom(a, a.BitLen()), nil
 }
 
 // ParseDuration parses Go duration syntax plus a "d" suffix for whole days ("30d").
