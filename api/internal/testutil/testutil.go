@@ -173,6 +173,8 @@ func New(t testing.TB, env map[string]string) *Harness {
 		VALUES ($1, 'admin', 'test admin', $2)`, key.ID, key.Hash()); err != nil {
 		t.Fatal(err)
 	}
+	// Inserted behind the server's back, so tell its key index directly.
+	h.Inst.App.Auth.RememberKey(key.ID, key.Hash())
 	h.AdminKey = key.String()
 	return h
 }

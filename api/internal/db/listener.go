@@ -19,6 +19,8 @@ type Listener struct {
 	OnChange func(rev int64)
 	// OnStatus is called with the worker id from each ipvalet_status notification.
 	OnStatus func(workerID string)
+	// OnKey is called with the key id from each ipvalet_keys notification.
+	OnKey func(keyID string)
 	// OnReconnect is called after the connection is re-established, since
 	// notifications may have been missed while it was down.
 	OnReconnect func()
@@ -56,7 +58,7 @@ func (l *Listener) connect(ctx context.Context) (*pgx.Conn, error) {
 	if err != nil {
 		return nil, redact(err)
 	}
-	for _, ch := range []string{ChannelChanges, ChannelStatus} {
+	for _, ch := range []string{ChannelChanges, ChannelStatus, ChannelKeys} {
 		if _, err := conn.Exec(cctx, "LISTEN "+pgx.Identifier{ch}.Sanitize()); err != nil {
 			conn.Close(context.Background())
 			return nil, err
@@ -117,6 +119,10 @@ func (l *Listener) wait(ctx context.Context, conn *pgx.Conn) error {
 		case ChannelStatus:
 			if l.OnStatus != nil {
 				l.OnStatus(n.Payload)
+			}
+		case ChannelKeys:
+			if l.OnKey != nil {
+				go l.OnKey(n.Payload)
 			}
 		}
 	}

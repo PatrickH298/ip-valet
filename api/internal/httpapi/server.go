@@ -20,6 +20,7 @@ import (
 
 	"github.com/PatrickH298/ip-valet/api/internal/auth"
 	"github.com/PatrickH298/ip-valet/api/internal/config"
+	"github.com/PatrickH298/ip-valet/api/internal/db"
 	"github.com/PatrickH298/ip-valet/api/internal/events"
 	"github.com/PatrickH298/ip-valet/api/internal/metrics"
 	"github.com/PatrickH298/ip-valet/api/internal/rules"
@@ -42,8 +43,14 @@ type Deps struct {
 // Server holds the routes and their dependencies.
 type Server struct {
 	Deps
-	mux      *http.ServeMux
+	all      *http.ServeMux // every route, for a single listener
+	pubMux   *http.ServeMux // client and worker routes, health
+	adminMux *http.ServeMux // admin routes, health
 	patterns []string
+
+	readyMu  sync.Mutex
+	readyAt  time.Time
+	readyErr string
 
 	warnUntrustedXFF sync.Once
 
@@ -55,7 +62,7 @@ type Server struct {
 
 // New builds the server and registers every route.
 func New(d Deps) *Server {
-	s := &Server{Deps: d, mux: http.NewServeMux()}
+	s := &Server{Deps: d, all: http.NewServeMux(), pubMux: http.NewServeMux(), adminMux: http.NewServeMux()}
 	s.streams, s.cancelStream = context.WithCancel(context.Background())
 	s.routes()
 	return s
@@ -132,9 +139,21 @@ func (s *Server) routes() {
 // handlerFunc is an authenticated handler; returned errors become error responses.
 type handlerFunc func(w http.ResponseWriter, r *http.Request, p *auth.Principal) error
 
+// register adds a route to the combined mux and to the public or admin one:
+// /v1/admin routes are admin-only, health routes are on both.
 func (s *Server) register(pattern string, h http.Handler) {
 	s.patterns = append(s.patterns, pattern)
-	s.mux.Handle(pattern, h)
+	s.all.Handle(pattern, h)
+	_, path, _ := strings.Cut(pattern, " ")
+	switch {
+	case strings.HasPrefix(path, "/v1/admin/"):
+		s.adminMux.Handle(pattern, h)
+	case strings.HasPrefix(path, "/v1/"):
+		s.pubMux.Handle(pattern, h)
+	default:
+		s.pubMux.Handle(pattern, h)
+		s.adminMux.Handle(pattern, h)
+	}
 }
 
 func (s *Server) public(pattern string, h func(http.ResponseWriter, *http.Request) error) {
@@ -218,9 +237,20 @@ func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 var allMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 
-// Handler returns the API handler: request ids, access logs, metrics,
-// panic recovery and JSON 404/405 responses around the routes.
-func (s *Server) Handler() http.Handler {
+// Handler serves every route, for running with no separate admin listener.
+func (s *Server) Handler() http.Handler { return s.wrap(s.all) }
+
+// PublicHandler serves the client and worker APIs and health, without any
+// admin route: the listener the reverse proxy exposes.
+func (s *Server) PublicHandler() http.Handler { return s.wrap(s.pubMux) }
+
+// AdminHandler serves the admin API and health: the listener kept off the
+// public proxy.
+func (s *Server) AdminHandler() http.Handler { return s.wrap(s.adminMux) }
+
+// wrap adds request ids, access logs, metrics, panic recovery and JSON
+// 404/405 responses around a mux.
+func (s *Server) wrap(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		info := &reqInfo{id: newRequestID()}
@@ -240,7 +270,7 @@ func (s *Server) Handler() http.Handler {
 			// Responses can carry new keys and address lists; no cache may keep them.
 			h.Set("Cache-Control", "no-store")
 		}
-		r = r.WithContext(context.WithValue(r.Context(), reqInfoKey, info))
+		r = r.WithContext(db.WithClientIP(context.WithValue(r.Context(), reqInfoKey, info), info.ip))
 		sw := &statusWriter{ResponseWriter: w}
 
 		defer func() {
@@ -275,12 +305,12 @@ func (s *Server) Handler() http.Handler {
 				"request_id", info.id)
 		}()
 
-		if _, pattern := s.mux.Handler(r); pattern == "" {
+		if _, pattern := mux.Handler(r); pattern == "" {
 			var allow []string
 			for _, m := range allMethods {
 				r2 := r.Clone(r.Context())
 				r2.Method = m
-				if _, p := s.mux.Handler(r2); p != "" {
+				if _, p := mux.Handler(r2); p != "" {
 					allow = append(allow, m)
 				}
 			}
@@ -293,7 +323,7 @@ func (s *Server) Handler() http.Handler {
 			s.writeErr(sw, r, errNotFound)
 			return
 		}
-		s.mux.ServeHTTP(sw, r)
+		mux.ServeHTTP(sw, r)
 	})
 }
 

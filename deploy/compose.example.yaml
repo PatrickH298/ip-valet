@@ -1,0 +1,75 @@
+# Example deployment: the ip-valet API and its Postgres. Copy it, read
+# deploy/README.md, fill in the secrets and the proxy settings, then
+# `docker compose up -d`. Your reverse proxy (Traefik, Caddy, nginx...)
+# terminates TLS and forwards to api:8080 only.
+
+name: ip-valet
+
+services:
+  api:
+    image: ghcr.io/patrickh298/ip-valet-api:main # pin a release tag once one exists
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    # Hardening: no writable filesystem, no Linux capabilities, no privilege
+    # escalation. The image already runs as a non-root user (uid 65532).
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      IPVALET_DATABASE_URL_FILE: /run/secrets/ipvalet_database_url
+      IPVALET_LISTEN_ADDR: ":8080" # public API: the only port the proxy should reach
+      IPVALET_ADMIN_LISTEN_ADDR: ":8081" # admin API: trusted networks only (see ports)
+      IPVALET_METRICS_ADDR: ":9090" # Prometheus: internal network only
+      # The proxy's address, or its network's subnet. Without it every client
+      # behind the proxy shares one failed-authentication budget.
+      IPVALET_TRUSTED_PROXIES: ${IPVALET_TRUSTED_PROXIES:?set to your reverse proxy's address or subnet}
+      # Optional bootstrap admin key, as a hash so this host never holds the key
+      # (see deploy/README.md). Or create one with `create-admin-key`.
+      # IPVALET_ADMIN_KEY_HASH: "<keyid>:<sha256 hex>"
+    secrets: [ipvalet_database_url]
+    ports:
+      # Admin API on this host only. To reach it from your LAN or VPN, bind
+      # to that interface's address instead; never publish it to the internet.
+      - "127.0.0.1:8081:8081"
+    networks: [proxy, internal]
+
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      # The superuser is only used by the init script; the API connects as
+      # the "ipvalet" role, which owns just its own database.
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      IPVALET_DB_PASSWORD_FILE: /run/secrets/ipvalet_db_password
+    secrets: [postgres_password, ipvalet_db_password]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "ipvalet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [internal] # never published
+
+networks:
+  # Shared with your reverse proxy; create it there, or rename to match.
+  proxy:
+    external: true
+  # The database's network: no route to or from outside.
+  internal:
+    internal: true
+
+secrets:
+  ipvalet_database_url:
+    file: ./secrets/ipvalet_database_url
+  postgres_password:
+    file: ./secrets/postgres_password
+  ipvalet_db_password:
+    file: ./secrets/ipvalet_db_password
+
+volumes:
+  db-data:

@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/PatrickH298/ip-valet/api/internal/app"
+	"github.com/PatrickH298/ip-valet/api/internal/auth"
 	"github.com/PatrickH298/ip-valet/api/internal/db"
 	"github.com/PatrickH298/ip-valet/api/internal/jobs"
 	"github.com/PatrickH298/ip-valet/api/internal/testutil"
@@ -118,6 +119,12 @@ func TestReadyz(t *testing.T) {
 	dbURL := testutil.NewDatabase(t)
 	inst := testutil.StartInstance(t, testutil.Config(t, dbURL, nil))
 	c := httpClient()
+	key, _ := auth.NewKey()
+	if _, err := pgxPool(t, dbURL).Exec(context.Background(), `INSERT INTO api_keys (id, kind, name, secret_hash)
+		VALUES ($1, 'admin', 'k', $2)`, key.ID, key.Hash()); err != nil {
+		t.Fatal(err)
+	}
+	inst.App.Auth.RememberKey(key.ID, key.Hash())
 	get := func(path string) int {
 		resp, err := c.Get(inst.URL + path)
 		if err != nil {
@@ -129,6 +136,11 @@ func TestReadyz(t *testing.T) {
 	if s := get("/readyz"); s != 200 {
 		t.Fatalf("readyz: %d", s)
 	}
+	// Leave a connection idle in the pool, so the request after the drop
+	// meets a connection the server has terminated (SQLSTATE 57P01).
+	if r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil); r.Status != 200 {
+		t.Fatalf("before the drop: %d", r.Status)
+	}
 	if s := get("/healthz"); s != 200 {
 		t.Fatalf("healthz: %d", s)
 	}
@@ -138,6 +150,14 @@ func TestReadyz(t *testing.T) {
 	name := pgx.Identifier{u.Path[1:]}.Sanitize()
 	if _, err := admin.Exec(context.Background(), `DROP DATABASE `+name+` WITH (FORCE)`); err != nil {
 		t.Fatal(err)
+	}
+	// A real key needs the database for its status: 503 unavailable, even on
+	// a pooled connection the server has just terminated.
+	for i := 0; i < 3; i++ {
+		r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil)
+		if r.Status != 503 || r.Code(t) != "unavailable" {
+			t.Fatalf("request %d with the database gone: %d %s", i, r.Status, r.Body)
+		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for get("/readyz") != http.StatusServiceUnavailable {
@@ -149,9 +169,14 @@ func TestReadyz(t *testing.T) {
 	if s := get("/healthz"); s != 200 {
 		t.Fatalf("healthz with the database gone: %d", s)
 	}
-	// Authenticated routes report 503 unavailable.
+	// A bad key is refused from memory, without the database.
 	r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/entries", "ipv_aaaaaaaaaaaaaaaa_"+
 		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", nil)
+	if r.Status != 401 {
+		t.Fatalf("bad key with the database gone: %d %s", r.Status, r.Body)
+	}
+	// A real key needs the database for its status: 503 unavailable.
+	r = testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil)
 	if r.Status != 503 || r.Code(t) != "unavailable" {
 		t.Fatalf("API with the database gone: %d %s", r.Status, r.Body)
 	}

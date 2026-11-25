@@ -28,7 +28,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.DBMaxConns != 10 || c.ListenAddr != ":8080" || c.MetricsAddr != ":9090" || c.DefaultTTL != 30*24*time.Hour ||
-		c.DefaultPrefixV4 != 32 || c.DefaultPrefixV6 != 64 || c.AuthFailuresPerMinute != 10 || c.MaxStreamsPerKey != 4 || c.TrustedProxies != nil ||
+		c.DefaultPrefixV4 != 32 || c.DefaultPrefixV6 != 64 || c.AuthFailuresPerMinute != 10 || c.AdminListenAddr != ":8081" || c.AdminKeySource != "" || c.MaxStreamsPerKey != 4 || c.TrustedProxies != nil ||
 		c.RetentionEntries != 90*24*time.Hour || c.RetentionAudit != 365*24*time.Hour || c.PurgeInterval != time.Hour ||
 		c.SSEHeartbeat != 20*time.Second || c.ClientEventsRecheck != 30*time.Second || c.MaxBodyBytes != 65536 ||
 		c.ShutdownTimeout != 15*time.Second || c.AdminKeyID != "" {
@@ -80,6 +80,28 @@ func TestSecretsAndErrors(t *testing.T) {
 	if _, err := Load(env(map[string]string{"IPVALET_DATABASE_URL_FILE": "/missing"}), files(nil)); err == nil ||
 		!strings.Contains(err.Error(), "IPVALET_DATABASE_URL_FILE") {
 		t.Errorf("missing file: %v", err)
+	}
+}
+
+func TestAdminSettings(t *testing.T) {
+	key, _ := auth.NewKey()
+	for want, m := range map[string]map[string]string{
+		"env":  {"IPVALET_ADMIN_KEY": key.String()},
+		"file": {"IPVALET_ADMIN_KEY_FILE": "/run/key"},
+		"hash": {"IPVALET_ADMIN_KEY_HASH": auth.HashLine(key)},
+	} {
+		m["IPVALET_DATABASE_URL"] = "x"
+		c, err := Load(env(m), files(map[string]string{"/run/key": key.String()}))
+		if err != nil || c.AdminKeySource != want {
+			t.Errorf("%s: source %q, err %v", want, c.AdminKeySource, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{"IPVALET_DATABASE_URL": "x", "IPVALET_ADMIN_LISTEN_ADDR": ":8080"}), files(nil)); err == nil {
+		t.Error("admin listener on the API address accepted")
+	}
+	c, err := Load(env(map[string]string{"IPVALET_DATABASE_URL": "x", "IPVALET_ADMIN_LISTEN_ADDR": ""}), files(nil))
+	if err != nil || c.AdminListenAddr != "" {
+		t.Errorf("empty admin listener: %q %v", c.AdminListenAddr, err)
 	}
 }
 

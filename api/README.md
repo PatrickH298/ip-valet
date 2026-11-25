@@ -75,7 +75,8 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days
 | --- | --- | --- |
 | `IPVALET_DATABASE_URL` *(secret)* | required | Postgres connection string (Postgres 16 or newer) |
 | `IPVALET_DB_MAX_CONNS` | `10` | Pool size; one more connection is held for `LISTEN` |
-| `IPVALET_LISTEN_ADDR` | `:8080` | API listen address (plain HTTP) |
+| `IPVALET_LISTEN_ADDR` | `:8080` | Public listen address: client and worker APIs (plain HTTP, behind the proxy) |
+| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Admin API listen address; keep it off the proxy. Empty serves admin routes on the public address (with a startup warning) |
 | `IPVALET_METRICS_ADDR` | `:9090` | Address for `/metrics`; empty disables metrics |
 | `IPVALET_ADMIN_KEY` *(secret)* | unset | An admin key accepted in addition to database keys |
 | `IPVALET_ADMIN_KEY_HASH` | unset | Alternative to `IPVALET_ADMIN_KEY`: `<keyid>:<hex sha256 of secret>` from `hash-key`. Setting both is an error. |
@@ -99,14 +100,17 @@ them later does not alter existing rules.
 
 ## Endpoints without authentication
 
+These are on both the public and the admin listener:
+
 - `GET /healthz` returns 200 `ok` whenever the process is serving.
 - `GET /readyz` returns 200 when `SELECT 1` succeeds within 2 s and the
-  `LISTEN` connection is up. Otherwise it returns 503.
+  `LISTEN` connection is up. Otherwise it returns 503. The database check is
+  reused for a second, so probes cost at most one query per second.
 - `GET /metrics` is served on `IPVALET_METRICS_ADDR` only, so the public
   proxy never exposes it.
 
 Logs are JSON on stdout: one access line per request with the method, route
-pattern, status, duration, actor and request id. Keys, the `Authorization`
+pattern, status, duration, actor, client address and request id. Keys, the `Authorization`
 header and request bodies are never logged. Every response carries an
 `X-Request-Id` header.
 
@@ -121,8 +125,9 @@ docker build -t ip-valet-api \
 ```
 
 The image is built from `gcr.io/distroless/static-debian12:nonroot`. It runs as
-a non-root user, needs no writable filesystem and exposes 8080 (API) and 9090
-(metrics).
+a non-root user, needs no writable filesystem and exposes 8080 (public API),
+8081 (admin API) and 9090 (metrics). For a hardened Compose setup with
+Postgres, see [`deploy/`](../deploy/README.md).
 
 ## Development
 

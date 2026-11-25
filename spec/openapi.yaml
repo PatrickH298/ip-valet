@@ -15,6 +15,13 @@ info:
     malformed, unknown, revoked or expired key is `401 unauthenticated`; a key
     of the wrong kind is `403 forbidden`.
 
+    **Listeners.** The client and worker APIs are served on the public
+    listener (port 8080 by default), which the reverse proxy exposes. The
+    admin API (`/v1/admin/*`) is served on a separate admin listener (port
+    8081 by default) that should be reachable only from a trusted network;
+    the public listener answers `/v1/admin/*` with 404. Both serve
+    `/healthz` and `/readyz`.
+
     **Failed authentication.** A network (an IPv4 address, or an IPv6 /64)
     that fails authentication too often, by default 10 times a minute, has
     its requests refused unchecked with 429 `too_many_attempts` and
@@ -1213,10 +1220,21 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [revision, workers]
+                required: [revision, workers, keys]
                 properties:
                   revision: { type: integer, format: int64 }
                   workers: { type: array, items: { $ref: "#/components/schemas/WorkerHealth" } }
+                  keys:
+                    type: object
+                    description: |
+                      Active keys that need attention: `expiring_soon` expire
+                      within 14 days (an unattended worker or client would
+                      stop working); `unused` have not been used for 30 days
+                      (likely forgotten and worth revoking).
+                    required: [expiring_soon, unused]
+                    properties:
+                      expiring_soon: { type: array, items: { $ref: "#/components/schemas/KeySummary" } }
+                      unused: { type: array, items: { $ref: "#/components/schemas/KeySummary" } }
         "400": { $ref: "#/components/responses/InvalidRequest" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -2062,7 +2080,7 @@ components:
       type: object
       required: [code, message]
       properties:
-        code: { type: string, enum: [rule_shadowed, cross_realm_selector] }
+        code: { type: string, enum: [rule_shadowed, cross_realm_selector, admin_key_without_expiry] }
         message: { type: string }
         rule_id:
           $ref: "#/components/schemas/UUID"
@@ -2446,9 +2464,19 @@ components:
               code: { $ref: "#/components/schemas/WorkerRejectionCode" }
               detail: { type: [string, "null"] }
               revision: { type: integer, format: int64 }
+    KeySummary:
+      type: object
+      required: [id, kind, name, created_at, expires_at, last_used_at]
+      properties:
+        id: { $ref: "#/components/schemas/KeyId" }
+        kind: { $ref: "#/components/schemas/KeyKind" }
+        name: { type: string }
+        created_at: { $ref: "#/components/schemas/Timestamp" }
+        expires_at: { $ref: "#/components/schemas/NullableTimestamp" }
+        last_used_at: { $ref: "#/components/schemas/NullableTimestamp" }
     AuditEntry:
       type: object
-      required: [id, at, actor, client_id, action, object_type, object_id, realm, user, group, prefix, details]
+      required: [id, at, actor, client_id, action, object_type, object_id, realm, user, group, prefix, details, client_ip]
       properties:
         id: { type: integer, format: int64 }
         at: { $ref: "#/components/schemas/Timestamp" }
@@ -2464,3 +2492,6 @@ components:
         group: { type: [string, "null"] }
         prefix: { type: [string, "null"] }
         details: { type: object }
+        client_ip:
+          type: [string, "null"]
+          description: The address of the request that made the change; null for the server itself and the command line.

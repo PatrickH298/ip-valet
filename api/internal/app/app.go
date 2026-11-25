@@ -56,21 +56,40 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*App, erro
 			"workers reporting many rejections may get 413", "max_body_bytes", cfg.MaxBodyBytes,
 			"needed", httpapi.MaxStatusReportBytes)
 	}
+	if cfg.AdminKeySource == "env" {
+		log.Warn("the environment admin key is set as plain IPVALET_ADMIN_KEY, which shows in process and " +
+			"container listings; prefer IPVALET_ADMIN_KEY_FILE or IPVALET_ADMIN_KEY_HASH")
+	}
+	if cfg.AdminListenAddr == "" {
+		log.Warn("IPVALET_ADMIN_LISTEN_ADDR is empty, so the admin API shares the public listener; " +
+			"make sure the reverse proxy does not expose /v1/admin")
+	}
 	a := &App{Config: cfg, Log: log, Pool: pool, Hub: events.NewHub()}
 	bgCtx, cancel := context.WithCancel(context.Background())
 	a.cancel = cancel
 
+	// The authenticator exists before LISTEN starts, and the key index is
+	// loaded after it, so no key created in between is missed.
+	a.Auth = auth.NewAuthenticator(pool, cfg.AdminKeyID, cfg.AdminKeyHash, cfg.AuthFailuresPerMinute, log)
 	a.Listener = db.NewListener(cfg.DatabaseURL, log)
 	a.Listener.OnChange = a.Hub.Changed
 	a.Listener.OnStatus = a.Hub.Status
-	a.Listener.OnReconnect = a.Hub.WakeAll
+	a.Listener.OnKey = a.Auth.KeyCreated
+	a.Listener.OnReconnect = func() {
+		a.Hub.WakeAll()
+		a.Auth.ReloadKeys()
+	}
 	if err := a.Listener.Start(bgCtx); err != nil {
 		cancel()
 		pool.Close()
 		return nil, fmt.Errorf("LISTEN connection: %w", err)
 	}
-
-	a.Auth = auth.NewAuthenticator(pool, cfg.AdminKeyID, cfg.AdminKeyHash, cfg.AuthFailuresPerMinute, log)
+	if err := a.Auth.LoadKeys(ctx); err != nil {
+		cancel()
+		<-a.Listener.Done()
+		pool.Close()
+		return nil, fmt.Errorf("loading keys: %w", err)
+	}
 	a.Metrics = metrics.New(pool, a.Hub, log)
 	a.Auth.OnFailure = func(reason string) { a.Metrics.AuthFailed.WithLabelValues(reason).Inc() }
 	a.API = httpapi.New(httpapi.Deps{Config: cfg, Pool: pool, Hub: a.Hub, Auth: a.Auth,
@@ -117,21 +136,31 @@ func (a *App) MetricsHandler() http.Handler {
 // Serve runs the API and metrics listeners until ctx is cancelled, then shuts
 // down: stop accepting, end SSE streams, wait for in-flight requests.
 func (a *App) Serve(ctx context.Context) error {
-	apiLn, err := net.Listen("tcp", a.Config.ListenAddr)
-	if err != nil {
-		return err
+	type endpoint struct {
+		addr string
+		h    http.Handler
 	}
-	servers := []*http.Server{NewHTTPServer(a.Config.ListenAddr, a.API.Handler(), a.Log)}
-	listeners := []net.Listener{apiLn}
+	eps := []endpoint{{a.Config.ListenAddr, a.API.Handler()}}
+	if a.Config.AdminListenAddr != "" {
+		eps = []endpoint{{a.Config.ListenAddr, a.API.PublicHandler()}, {a.Config.AdminListenAddr, a.API.AdminHandler()}}
+	}
 	if a.Config.MetricsAddr != "" {
-		mLn, err := net.Listen("tcp", a.Config.MetricsAddr)
+		eps = append(eps, endpoint{a.Config.MetricsAddr, a.MetricsHandler()})
+	}
+	var (
+		servers   []*http.Server
+		listeners []net.Listener
+	)
+	for _, ep := range eps {
+		ln, err := net.Listen("tcp", ep.addr)
 		if err != nil {
-			apiLn.Close()
+			for _, l := range listeners {
+				l.Close()
+			}
 			return err
 		}
-		ms := NewHTTPServer(a.Config.MetricsAddr, a.MetricsHandler(), a.Log)
-		servers = append(servers, ms)
-		listeners = append(listeners, mLn)
+		servers = append(servers, NewHTTPServer(ep.addr, ep.h, a.Log))
+		listeners = append(listeners, ln)
 	}
 	errc := make(chan error, len(servers))
 	for i, srv := range servers {

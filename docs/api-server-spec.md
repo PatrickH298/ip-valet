@@ -16,7 +16,7 @@ Build the ip-valet API server: one Go binary that owns the Postgres database and
 4. A `Dockerfile` producing a minimal, non-root image.
 5. Tests covering every item in Acceptance tests, runnable with `go test ./...` against a disposable Postgres named by `IPVALET_TEST_DATABASE_URL` (in CI, where `CI` is set, a missing URL fails the tests instead of skipping them).
 6. A `README.md` in `api/` listing the environment variables and commands.
-7. `.github/workflows/ci.yml`: on every pull request, push to `main`, `api/v*` tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) when `api/`, `spec/` or the workflow changed; check DCO sign-offs on pull requests; build the image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-api` from `main` (`main`, `sha-<commit>`) and from tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check.
+7. `.github/workflows/ci.yml`: on every pull request, push to `main`, `api/v*` tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) when `api/`, `spec/` or the workflow changed; check DCO sign-offs on pull requests; build the image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-api` from `main` (`main`, `sha-<commit>`) and from tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check. Pull requests from `dependabot[bot]` and `renovate[bot]` skip the DCO check. `.github/dependabot.yml` opens weekly grouped updates for Go modules, the pinned actions and the base images.
 
 **Definition of done**
 
@@ -89,7 +89,8 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days (
 | --- | --- | --- |
 | `IPVALET_DATABASE_URL` *(secret)* | required | Postgres connection string |
 | `IPVALET_DB_MAX_CONNS` | `10` | Pool size (one more connection is held for `LISTEN`) |
-| `IPVALET_LISTEN_ADDR` | `:8080` | API listen address, plain HTTP behind a TLS-terminating proxy |
+| `IPVALET_LISTEN_ADDR` | `:8080` | Public listen address (client and worker APIs), plain HTTP behind a TLS-terminating proxy |
+| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Admin API listen address, for trusted networks only; empty serves admin routes on `IPVALET_LISTEN_ADDR` |
 | `IPVALET_METRICS_ADDR` | `:9090` | Address for `/metrics`; empty disables metrics |
 | `IPVALET_ADMIN_KEY` *(secret)* | unset | An admin key accepted in addition to database keys |
 | `IPVALET_ADMIN_KEY_HASH` | unset | Alternative to `IPVALET_ADMIN_KEY`: `<keyid>:<hex sha256 of secret>`, as printed by `hash-key`. Setting both is an error. |
@@ -268,7 +269,8 @@ CREATE TABLE audit_log (
   username    text,
   grp         text,
   prefix      cidr,
-  details     jsonb NOT NULL DEFAULT '{}'
+  details     jsonb NOT NULL DEFAULT '{}',
+  client_ip   inet             -- the caller's address (migration 00002); NULL for the server and CLI
 );
 CREATE INDEX audit_log_at ON audit_log (at);
 ```
@@ -289,9 +291,9 @@ Every `/v1` request carries `Authorization: Bearer <key>`. Health and metrics en
 
 0. If the caller's network has spent its failed-authentication budget (below) → 429 `too_many_attempts` with `Retry-After`, without looking at the key.
 1. Missing header, wrong scheme, or a key not matching the pattern → 401 `unauthenticated`, with `WWW-Authenticate: Bearer`.
-2. If the keyid matches the environment admin key's keyid, compare against it; otherwise load the `api_keys` row by id. No row → 401.
-3. Compare `SHA-256(secret)` to the stored hash with `crypto/subtle.ConstantTimeCompare`. Mismatch → 401.
-4. `revoked_at` set, or `expires_at` in the past (database time) → 401. Do not cache key rows, so revocation takes effect on the next request.
+2. If the keyid matches the environment admin key's keyid, compare against it. Otherwise look the keyid up in the in-memory key index (below). Unknown → 401, without a database query.
+3. Compare `SHA-256(secret)` to the indexed hash with `crypto/subtle.ConstantTimeCompare`. Mismatch → 401, without a database query.
+4. Only now load the key's row: kind, `revoked_at`, `expires_at` (database time), client and realms. No row (deleted) → 401; revoked or expired → 401. The status is read on every request, never cached, so revocation takes effect on the next request.
 5. The route's required kind differs from the key's kind → 403 `forbidden`. Admin routes need `admin`, `/v1/worker/*` needs `worker`, all other `/v1` routes need `client`.
 6. Client keys: load the client's realms. A client with no realms gets 403 `realm_not_allowed` on every call.
 7. Record `last_used_at` asynchronously, at most once a minute per key.
@@ -300,7 +302,9 @@ Every 401 spends one attempt from the caller's network budget and is counted in 
 
 **Environment admin key.** At startup, parse `IPVALET_ADMIN_KEY` (or its `_FILE`) into keyid and secret hash, or take `IPVALET_ADMIN_KEY_HASH` (`<keyid>:<64 hex chars>`) directly. Hold only the keyid and hash in memory. Requests made with it have actor `admin:env` in the audit log. It cannot be listed or revoked through the API. `hash-key` reads a full key on stdin and prints `<keyid>:<hex sha256 of secret>`.
 
-**Failed-authentication throttle.** One token bucket per client network, kept in memory and evicted after 10 minutes without a failure: `rate.Limit(n/60)` with burst `n`, where `n` is `IPVALET_AUTH_FAILURES_PER_MINUTE`. A network is an IPv4 address or an IPv6 /64. Only failed authentications spend tokens; while the bucket holds less than one token, every request from that network is refused before any key lookup. Log a warning when a network's budget runs out. There are no rate limits on authenticated requests.
+**Key index.** Each instance holds every stored key's id and secret hash in memory; both are fixed when a key is created. Load it at startup after the `LISTEN` connection is up, add a key this instance creates as soon as its transaction commits, and load any key named in an `ipvalet_keys` notification (sent by every key insert, including `create-admin-key`). Reload it in full when the `LISTEN` connection reconnects and every 5 minutes as a backstop. A flood of bad keys therefore costs no database work.
+
+**Failed-authentication throttle.** One token bucket per client network, kept in memory, evicted after 10 minutes without a failure, and capped at 100,000 networks (past that, the network that failed longest ago is forgotten; since failures cost no database work, that gives an attacker nothing of value): `rate.Limit(n/60)` with burst `n`, where `n` is `IPVALET_AUTH_FAILURES_PER_MINUTE`. A network is an IPv4 address or an IPv6 /64. Only failed authentications spend tokens; while the bucket holds less than one token, every request from that network is refused before any key lookup. Log a warning when a network's budget runs out. There are no rate limits on authenticated requests.
 
 **Client address.** The caller is the connection's peer, unless the peer is in `IPVALET_TRUSTED_PROXIES`; then read `X-Forwarded-For` from the right, skip trusted proxies, and take the first other address (IPv4-mapped addresses are unmapped). A malformed hop stops the walk at the last address vouched for. If a request carries `X-Forwarded-For` from an untrusted peer, log one warning, since every client behind that proxy would then share one budget. The address appears in access logs as `client_ip`.
 
@@ -472,6 +476,7 @@ Rule changes that remove or shorten nothing, client and key changes, worker name
 | --- | --- | --- |
 | `ipvalet_changes` | the new revision, as decimal text | every revision bump |
 | `ipvalet_status` | the worker id | a status report is stored |
+| `ipvalet_keys` | the key id | a key is created |
 
 Each API instance holds one dedicated connection running `LISTEN` on both channels and feeds an in-process hub. If that connection drops, reconnect with backoff, then wake every connected stream, since notifications may have been missed.
 
@@ -714,7 +719,7 @@ data: {"id":"…","state":"active"}
 | Keys | `GET /keys`, `POST /keys`, `GET /keys/{id}`, `POST /keys/{id}/revoke` | POST `{ kind, client_id \| worker_id, name, expires_at? }` returns 201 with the key record and `"key": "ipv_…"`, shown only this once. List filters: `kind`, `client_id`, `worker_id`. A key record never contains the secret or its hash. |
 | Rules | `GET`, `POST /realms/{realm}/rules/{list}`; `PATCH`, `DELETE /realms/{realm}/rules/{list}/{id}`; `PUT /realms/{realm}/rules/{list}/order` | `list` is `ip`, `prefix`, `ttl` or `cap`. Common fields `{ user, group, position?, description? }`. IP adds `prefix, action`; prefix adds `min_len_v4, min_len_v6` (null = no limit); TTL adds `max_ttl` (a duration or `"unlimited"`); cap adds `max_prefixes`. `order` takes `{ "ids": […] }`, which must list every rule in that list exactly once. All changes go through the impact check. |
 | Entries | `GET /entries`, `GET /entries/{id}`, `DELETE /entries/{id}` | Like the client view, across all realms, plus `client_id`, `key_id`, `revision`, `deleted_by`, and worker `id`, `name` and `last_seen_at`. Extra filters: `client_id`, `worker_id` (entries the worker matches). |
-| Health | `GET /workers/{id}/health`, `GET /health` | Per worker: `applied_revision`, current revision, `lag`, `applied_generated_at`, `last_seen_at`, `last_error`, `last_error_at`, `last_instance`, `last_version`, `worker_streams` (on the answering API instance), rejections. `/health` lists every worker. |
+| Health | `GET /workers/{id}/health`, `GET /health` | Per worker: `applied_revision`, current revision, `lag`, `applied_generated_at`, `last_seen_at`, `last_error`, `last_error_at`, `last_instance`, `last_version`, `worker_streams` (on the answering API instance), rejections. `/health` lists every worker, plus `keys`: active keys expiring within 14 days (`expiring_soon`) or unused for 30 days (`unused`). |
 | Audit | `GET /audit` | Filters `since`, `until`, `actor`, `realm`, `action`; newest first. |
 
 **The impact check.** It applies to rule changes of any kind, subscription deletion, worker deletion, and worker family changes. No entry is ever left in place that fails a rule.
@@ -785,12 +790,14 @@ Codes may be added in later versions; a code's meaning never changes. The full c
 
 Expiry itself needs no job: desired state and applied state both compare `expires_at` with the database clock when read.
 
+**Listeners.** The public listener (`IPVALET_LISTEN_ADDR`) serves the client and worker APIs and health, and answers `/v1/admin/*` with 404. The admin listener (`IPVALET_ADMIN_LISTEN_ADDR`, default `:8081`) serves the admin API and health, and should be reachable only from trusted networks. With `IPVALET_ADMIN_LISTEN_ADDR` empty, one listener serves everything and the server logs a warning at startup. Metrics stay on their own listener.
+
 **HTTP server.** `ReadHeaderTimeout` 10 s, `ReadTimeout` 30 s, `WriteTimeout` 30 s (lifted per request for SSE routes), `IdleTimeout` 120 s. Reject bodies whose `Content-Length` exceeds the limit up front, and cap the rest with `http.MaxBytesReader`.
 
-**Health.** On the API listener, without authentication:
+**Health.** On the public and admin listeners, without authentication:
 
 - `GET /healthz` returns 200 `ok` whenever the process is serving.
-- `GET /readyz` returns 200 when `SELECT 1` succeeds within 2 s and the `LISTEN` connection is up, otherwise 503.
+- `GET /readyz` returns 200 when `SELECT 1` succeeds within 2 s and the `LISTEN` connection is up, otherwise 503. The database check's result is reused for one second and concurrent probes wait for the check in flight, so probes cost at most one query per second.
 
 **Metrics.** On `IPVALET_METRICS_ADDR` only, so they are not exposed through the proxy. Route labels use the route pattern, never the raw path. Worker gauges are read from the database at scrape time by a custom collector.
 
@@ -806,6 +813,8 @@ Expiry itself needs no job: desired state and applied state both compare `expire
 | `ipvalet_worker_rejections` | gauge | `worker` |
 | `ipvalet_worker_streams` | gauge | `worker` |
 | `ipvalet_client_streams` | gauge | none |
+| `ipvalet_keys_expiring_soon` | gauge | `kind` (active keys expiring within 14 days) |
+| `ipvalet_keys_unused` | gauge | `kind` (active keys unused for 30 days) |
 | `ipvalet_auth_failures_total` | counter | `reason` (`malformed`, `unknown_key`, `wrong_secret`, `inactive`, `throttled`) |
 | `ipvalet_entries_live` | gauge | `realm` |
 
@@ -831,6 +840,11 @@ Each item is at least one automated test against a real Postgres. Unit tests for
 - [x] `X-Forwarded-For` is believed only from a trusted proxy, and prepending addresses does not escape the throttle.
 - [x] A key cannot open more than `IPVALET_MAX_STREAMS_PER_KEY` event streams; revoking a key ends its streams within a heartbeat.
 - [x] Responses carrying a new key are `Cache-Control: no-store` and `X-Content-Type-Options: nosniff`.
+- [x] Unknown keys and wrong secrets are refused without the database (401 even with the database gone); a key created on one instance is accepted by another within moments.
+- [x] The throttle forgets the network that failed longest ago once it tracks its maximum.
+- [x] The public listener answers admin routes with 404 and the admin listener serves them; each serves health.
+- [x] Audit rows record the caller's address.
+- [x] Creating an admin key without an expiry returns an `admin_key_without_expiry` warning; `/v1/admin/health` lists keys expiring soon and keys unused for 30 days.
 
 **Normalisation and rules**
 
@@ -907,6 +921,10 @@ The design doc did not settle these; this spec picked a value so the server coul
 | Rate limits | None for now | To be revisited; floods of bad keys are handled by the failed-authentication throttle |
 | Failed-authentication throttle | 10 failures a minute per IPv4 address or IPv6 /64, in memory per instance; refused requests are not checked | Keeps floods off the database; per-key lockouts would let anyone who knows a key id lock out its owner |
 | Client address | `X-Forwarded-For` only from `IPVALET_TRUSTED_PROXIES` | A client must not be able to choose its own address |
+| Key index | Key ids and secret hashes in memory; status always from the database | Bad keys cost no database work, and revocation still applies on the next request |
+| Admin listener | Separate listener on `:8081` | The admin API is never reachable through the public proxy, whatever the proxy or forwarded-address settings |
+| Readiness | Database check reused for one second | Unauthenticated probes cannot tie up database connections |
+| Audit address | Each audit row records the caller's address | The audit log is the record kept for a year |
 | Event streams per key | 4 per instance; keys re-checked every heartbeat | One key cannot multiply the work every change causes, and revocation reaches open streams |
 | Client event stream | Baseline of entries live or ended in the last 24 h; recheck every 30 s | Catches expiries without a notification |
 | Metrics | Separate listener on `:9090` | Not reachable through the public proxy |
