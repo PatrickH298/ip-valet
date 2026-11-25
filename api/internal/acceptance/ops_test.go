@@ -136,6 +136,11 @@ func TestReadyz(t *testing.T) {
 	if s := get("/readyz"); s != 200 {
 		t.Fatalf("readyz: %d", s)
 	}
+	// Leave a connection idle in the pool, so the request after the drop
+	// meets a connection the server has terminated (SQLSTATE 57P01).
+	if r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil); r.Status != 200 {
+		t.Fatalf("before the drop: %d", r.Status)
+	}
 	if s := get("/healthz"); s != 200 {
 		t.Fatalf("healthz: %d", s)
 	}
@@ -145,6 +150,14 @@ func TestReadyz(t *testing.T) {
 	name := pgx.Identifier{u.Path[1:]}.Sanitize()
 	if _, err := admin.Exec(context.Background(), `DROP DATABASE `+name+` WITH (FORCE)`); err != nil {
 		t.Fatal(err)
+	}
+	// A real key needs the database for its status: 503 unavailable, even on
+	// a pooled connection the server has just terminated.
+	for i := 0; i < 3; i++ {
+		r := testutil.DoURL(t, c, inst.URL, "GET", "/v1/admin/realms", key.String(), nil)
+		if r.Status != 503 || r.Code(t) != "unavailable" {
+			t.Fatalf("request %d with the database gone: %d %s", i, r.Status, r.Body)
+		}
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for get("/readyz") != http.StatusServiceUnavailable {

@@ -89,8 +89,23 @@ type errorDetail struct {
 func isUnavailable(err error) bool {
 	var ce *pgconn.ConnectError
 	var ne net.Error
-	return errors.As(err, &ce) || errors.As(err, &ne) || pgconn.Timeout(err) ||
-		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded)
+	if errors.As(err, &ce) || errors.As(err, &ne) || pgconn.Timeout(err) ||
+		errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Postgres's own reports that it cannot serve us right now: a pooled
+	// connection it terminated (57P01 admin_shutdown and the rest of class 57),
+	// a lost connection (class 08), too many clients or no resources (class
+	// 53), or the database no longer existing (3D000).
+	var pe *pgconn.PgError
+	if errors.As(err, &pe) {
+		switch {
+		case strings.HasPrefix(pe.Code, "57"), strings.HasPrefix(pe.Code, "08"),
+			strings.HasPrefix(pe.Code, "53"), pe.Code == "3D000":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) writeErr(w http.ResponseWriter, r *http.Request, err error) {
