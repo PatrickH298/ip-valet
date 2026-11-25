@@ -149,7 +149,8 @@ IPVALET_TEST_DATABASE_URL='postgres://postgres@localhost:5432/postgres?sslmode=d
 CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) runs the same
 checks plus gofmt, `go mod tidy -diff` and govulncheck, then builds and
 smoke-tests the image. Pushes to `main` and `api/vX.Y.Z` tags publish it to
-`ghcr.io`.
+`ghcr.io`. An API change also runs the dashboard's tests, which drive the
+dashboard against this server.
 
 `IPVALET_TEST_DATABASE_URL` must be a `postgres://` URL for a role that can
 create databases. Each test creates its own database and drops it afterwards.
