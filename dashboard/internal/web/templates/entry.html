@@ -7,7 +7,7 @@
   <dt>Group</dt><dd>{{$e.Group}}</dd>
   <dt>Expires</dt><dd>{{if $e.ExpiresAt}}{{ts $e.ExpiresAt}} ({{ago $e.ExpiresAt}}){{else}}never{{end}}</dd>
   <dt>Registered</dt><dd>{{ts $e.CreatedAt}}, last changed {{ts $e.UpdatedAt}}</dd>
-  <dt>Client</dt><dd>{{if $e.ClientID}}<a href="/clients/{{$e.ClientID}}">{{or .ClientName "deleted client"}}</a>{{else}}deleted client{{end}}{{if $e.KeyID}}, key {{or .KeyName "(deleted)"}} <code>{{$e.KeyID}}</code>{{end}}</dd>
+  <dt>Added by</dt><dd>{{if .ByAdmin}}an admin{{else if $e.ClientID}}client <a href="/clients/{{$e.ClientID}}">{{or .ClientName "(deleted)"}}</a>{{else}}no client: an admin, or a client since deleted{{end}}{{if $e.KeyID}}, key {{or .KeyName "(deleted)"}} <code>{{$e.KeyID}}</code>{{end}}</dd>
   <dt>Submission</dt><dd><code>{{$e.SubmissionID}}</code></dd>
   <dt>Revision</dt><dd>{{$e.Revision}}</dd>
   {{if $e.DeletedAt}}<dt>Deleted</dt><dd>{{ts $e.DeletedAt}} by {{str $e.DeletedBy}}</dd>{{end}}

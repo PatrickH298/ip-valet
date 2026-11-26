@@ -246,3 +246,31 @@ type AuditEntry struct {
 	Details    map[string]any `json:"details"`
 	ClientIP   *string        `json:"client_ip"`
 }
+
+// GroupResult is one group's outcome in a rejected submission.
+type GroupResult struct {
+	Group string `json:"group"`
+	OK    bool   `json:"ok"`
+	Code  string `json:"code,omitempty"`
+	Limit *struct {
+		MaxTTL       string `json:"max_ttl,omitempty"`
+		MinPrefixLen *int   `json:"min_prefix_len,omitempty"`
+		MaxPrefixes  *int   `json:"max_prefixes,omitempty"`
+	} `json:"limit,omitempty"`
+}
+
+// SubmissionEntry is an entry a submission created or replaced.
+type SubmissionEntry struct {
+	ID       string `json:"id"`
+	Group    string `json:"group"`
+	Prefix   string `json:"prefix"`
+	Replaced bool   `json:"replaced"`
+	State    string `json:"state"`
+}
+
+// Submission is a successful submission.
+type Submission struct {
+	SubmissionID string            `json:"submission_id"`
+	Prefix       string            `json:"prefix"`
+	Entries      []SubmissionEntry `json:"entries"`
+}

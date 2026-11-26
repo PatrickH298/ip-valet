@@ -41,6 +41,8 @@ func (s *Server) routes(m *http.ServeMux) {
 	s.handle(m, "POST /keys/{id}/revoke", s.revokeKey)
 
 	s.handle(m, "GET /entries", s.entries)
+	s.handle(m, "GET /entries/new", s.newEntry)
+	s.handle(m, "POST /entries", s.createEntry)
 	s.handle(m, "GET /entries/{id}", s.entry)
 	s.handle(m, "POST /entries/{id}/delete", s.deleteEntry)
 

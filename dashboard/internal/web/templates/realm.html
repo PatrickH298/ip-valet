@@ -1,7 +1,7 @@
 {{define "content"}}{{with .Data}}
 <p class="crumbs"><a href="/realms">Realms</a> /</p>
 <h1>Realm {{.Realm.Name}}</h1>
-<p class="muted">Created {{ts .Realm.CreatedAt}}. <a href="{{query "/entries" "realm" .Realm.Name}}">Entries in this realm</a> · <a href="{{query "/audit" "realm" .Realm.Name}}">Audit log</a></p>
+<p class="muted">Created {{ts .Realm.CreatedAt}}. <a href="{{query "/entries" "realm" .Realm.Name}}">Entries in this realm</a> · <a href="{{query "/entries/new" "realm" .Realm.Name}}">Add an entry</a> · <a href="{{query "/audit" "realm" .Realm.Name}}">Audit log</a></p>
 <p>A submission must pass all four lists, in order. In each list, the first rule whose user and group match decides. Changing a rule enforces it on existing entries; you see which first.</p>
 
 {{range .Lists}}{{$list := .}}{{$n := len .Rules}}

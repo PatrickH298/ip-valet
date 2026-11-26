@@ -47,6 +47,7 @@ type Error struct {
 	Message   string
 	Fields    map[string]string
 	Impact    []ImpactItem
+	Results   []GroupResult // with submission_rejected: one per group
 	RequestID string
 	Err       error // the transport error, when Status is 0
 }
@@ -78,6 +79,7 @@ type errorBody struct {
 		Message string            `json:"message"`
 		Fields  map[string]string `json:"fields"`
 		Impact  []ImpactItem      `json:"impact"`
+		Results []GroupResult     `json:"results"`
 	} `json:"error"`
 }
 
@@ -125,6 +127,7 @@ func (c *Admin) do(ctx context.Context, method, path string, query url.Values, b
 		var eb errorBody
 		if json.Unmarshal(raw, &eb) == nil && eb.Error.Code != "" {
 			e.Code, e.Message, e.Fields, e.Impact = eb.Error.Code, eb.Error.Message, eb.Error.Fields, eb.Error.Impact
+			e.Results = eb.Error.Results
 		} else {
 			e.Code, e.Message = "unexpected_response", http.StatusText(resp.StatusCode)
 		}

@@ -492,3 +492,34 @@ func TestSwitchToBasic(t *testing.T) {
 		t.Fatalf("basic auth: %d", resp.StatusCode)
 	}
 }
+
+// TestAddEntry: an admin adds an entry for any user and groups, through the
+// realm's rules, and sees why a refused one was refused.
+func TestAddEntry(t *testing.T) {
+	t.Parallel()
+	s := newSetup(t)
+	d := newDash(t, nil)
+	d.signIn("alice", alicePW)
+	d.get("/entries/new?realm="+s.Realm).must(t, 200, "Add entry", `<option value="`+s.Realm+`" selected>`)
+	p := d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1\r\ng2\r\n"},
+		"prefix": {"8.8.3.3"}, "ttl": {"1d"}}).must(t, 200, "Added 8.8.3.3/32 for dana in 2 groups.", "8.8.3.3/32")
+	if p.URL.Path != "/entries" || p.URL.Query().Get("user") != "dana" {
+		t.Fatalf("after adding: %s", p.URL)
+	}
+	entries := items(admin(t, 200, "GET", "/v1/admin/entries?realm="+s.Realm+"&user=dana", nil))
+	if len(entries) != 2 || entries[0]["client_id"] != nil {
+		t.Fatalf("entries %v", entries)
+	}
+	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=entry.create&realm="+s.Realm, nil))
+	if len(audit) != 2 || audit[0]["on_behalf_of"] != "alice" || audit[0]["actor"] != d.KeyID {
+		t.Fatalf("audit %v", audit)
+	}
+	d.get("/entries/"+entries[0]["id"].(string)).must(t, 200, "Added by", "an admin, key dashboard")
+	// The realm's rules apply, and the page says which group failed and why.
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"10.0.0.1"},
+		"ttl": {"1d"}}).must(t, 422, "Nothing was added", "refused", "an IP rule denies this address")
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"8.8.3.4"},
+		"ttl": {"31d"}}).must(t, 422, "longer than the 30d the TTL rules allow")
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"8.8.3.4"},
+		"ttl": {"forever"}}).must(t, 400, "Check the fields marked below")
+}

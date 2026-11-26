@@ -73,6 +73,7 @@ type entryView struct {
 	Entry      api.Entry
 	ClientName string
 	KeyName    string
+	ByAdmin    bool // added with an admin key
 	Ended      bool
 }
 
@@ -91,7 +92,7 @@ func (s *Server) entry(w http.ResponseWriter, r *http.Request) error {
 	}
 	if e.KeyID != nil {
 		if k, err := s.API.Key(r.Context(), *e.KeyID); err == nil {
-			v.KeyName = k.Name
+			v.KeyName, v.ByAdmin = k.Name, k.Kind == "admin"
 		} else if !api.IsNotFound(err) {
 			return err
 		}

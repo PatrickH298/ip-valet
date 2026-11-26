@@ -1,5 +1,6 @@
 {{define "content"}}{{with .Data}}
 <h1>Entries</h1>
+<p><a class="button" href="{{query "/entries/new" "realm" (.Filter.Get "realm")}}">Add entry</a></p>
 <form method="get" action="/entries" class="filters">
   <label>Realm <select name="realm"><option value="">any</option>{{range .Realms}}<option value="{{.Name}}"{{if eq ($.Data.Filter.Get "realm") .Name}} selected{{end}}>{{.Name}}</option>{{end}}</select></label>
   <label>User <input name="user" value="{{.Filter.Get "user"}}" size="12"></label>

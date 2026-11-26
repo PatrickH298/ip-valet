@@ -230,6 +230,15 @@ func (f EntryFilter) query() url.Values {
 	return q
 }
 
+// Submit adds or replaces entries for user in each group, in any realm,
+// through the realm's rules (POST /v1/admin/submissions).
+func (c *Admin) Submit(ctx context.Context, realm, user string, groups []string, prefix, ttl string) (Submission, error) {
+	var out Submission
+	err := c.do(ctx, http.MethodPost, "/v1/admin/submissions", nil,
+		map[string]any{"realm": realm, "user": user, "groups": groups, "prefix": prefix, "ttl": ttl}, &out)
+	return out, err
+}
+
 func (c *Admin) Entries(ctx context.Context, f EntryFilter, page PageQuery) (Page[Entry], error) {
 	var out Page[Entry]
 	err := c.do(ctx, http.MethodGet, "/v1/admin/entries", page.apply(f.query()), nil, &out)
