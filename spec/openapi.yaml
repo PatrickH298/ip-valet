@@ -1402,6 +1402,49 @@ paths:
 
   # ---------------------------------------------------------------- admin: entries, audit
 
+  /v1/admin/submissions:
+    post:
+      tags: [admin]
+      operationId: createAdminSubmission
+      summary: Create or replace entries in any realm
+      description: |
+        Works as `POST /v1/submissions` does for a client, for any existing
+        realm, which is required. Every group goes through the same checks
+        (routing and the realm's rules), so an entry an admin adds obeys the
+        same rules as any other. The entries belong to no client; the audit
+        log records the admin key and, if sent, `IPValet-On-Behalf-Of`. A
+        realm that does not exist is 400.
+      security: [{ adminKey: [] }]
+      parameters:
+        - $ref: "#/components/parameters/OnBehalfOf"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdminSubmissionRequest" }
+      responses:
+        "201":
+          description: Every entry was created or replaced.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmissionResponse" }
+        "400": { $ref: "#/components/responses/InvalidRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413": { $ref: "#/components/responses/BodyTooLarge" }
+        "422":
+          description: At least one group failed a check; nothing was written.
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/RequestId" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmissionRejected" }
+        "429": { $ref: "#/components/responses/TooManyRequests" }
+        "500": { $ref: "#/components/responses/Internal" }
+        "503": { $ref: "#/components/responses/Unavailable" }
+
   /v1/admin/entries:
     get:
       tags: [admin]
@@ -1944,6 +1987,12 @@ components:
           groups: [fwusers, guests]
           prefix: "2001:db8:1234:5678::/64"
           ttl: 30d
+    AdminSubmissionRequest:
+      description: A submission request where the realm is required.
+      allOf:
+        - $ref: "#/components/schemas/SubmissionRequest"
+        - type: object
+          required: [realm]
     SubmissionResponse:
       type: object
       required: [submission_id, prefix, entries]

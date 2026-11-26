@@ -85,6 +85,7 @@ func (s *Server) routes() {
 
 	// Client.
 	s.handle("POST /v1/submissions", auth.KindClient, s.postSubmission)
+	s.handle("POST /v1/admin/submissions", auth.KindAdmin, s.postSubmission)
 	s.handle("DELETE /v1/submissions/{id}", auth.KindClient, s.deleteSubmission)
 	s.handle("GET /v1/entries", auth.KindClient, s.listClientEntries)
 	s.handle("GET /v1/entries/{id}", auth.KindClient, s.getClientEntry)

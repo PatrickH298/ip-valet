@@ -43,7 +43,7 @@ Every caller authenticates with an API key, and each key type can do one job. Th
 | --- | --- | --- | --- |
 | Client | One or more realms (required) | Submit, replace, list and delete entries in its realms; read their applied state | Act outside its realms; read desired state; manage configuration |
 | Worker | Exactly one worker | Read that worker's desired state; receive signals; report status | Submit entries; read other workers' state; read or change configuration, including its own subscriptions |
-| Admin | Global | Manage realms, clients, workers, subscriptions, keys and rules; list and delete any entry; read health and audit | Submit entries (entries always come through a client and its realm's rules) |
+| Admin | Global | Manage realms, clients, workers, subscriptions, keys and rules; add entries in any realm (through that realm's rules, like a client); list and delete any entry; read health and audit | Add an entry that breaks its realm's rules |
 
 That is the whole of the enforcement: a client acts only inside its realms, everything it registers there is bounded by the realm's rules, and a worker sees only what an admin subscribed it to. There are no per-client user or group allow-lists.
 
@@ -289,7 +289,7 @@ All paths are under `/v1`, and the OpenAPI file in `spec/` is the contract other
 | Worker | `POST /v1/worker/status` | Applied revision, rejections, or an error |
 | Admin (admin port) | `/v1/admin/realms`, `/clients`, `/workers`, `/workers/{id}/subscriptions`, `/subscriptions/{id}`, `/keys` | Create, read, update, delete; keys are shown once at creation |
 | Admin | `/v1/admin/realms/{realm}/rules/{ip,prefix,ttl,cap}` | Rule lists, including reordering |
-| Admin | `GET /v1/admin/entries`, `DELETE /v1/admin/entries/{id}` | Any entry, any realm |
+| Admin | `POST /v1/admin/submissions`, `GET /v1/admin/entries`, `DELETE /v1/admin/entries/{id}` | Add entries in any realm (same checks as a client submission); list and delete any entry |
 | Admin (admin port) | `GET /v1/admin/workers/{id}/health`, `GET /v1/admin/health`, `GET /v1/admin/audit` | Worker health and errors; audit log |
 | None | `GET /healthz`, `GET /readyz`, `GET /metrics` | Liveness, readiness (database reachable), Prometheus metrics (separate port) |
 

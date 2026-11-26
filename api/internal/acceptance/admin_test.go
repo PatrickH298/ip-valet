@@ -465,3 +465,85 @@ func TestRemovalOfExpiredEntryAfterSubscriptionDeleted(t *testing.T) {
 		t.Fatalf("after the worker confirmed: %s %v", st, per)
 	}
 }
+
+// TestAdminSubmissions: an admin adds entries in any realm, through the same
+// routing and rules as a client; the entries belong to no client, and the
+// audit log names the admin key and the person.
+func TestAdminSubmissions(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	s := h.Basic("r")
+	h.CreateRealm("other") // no client is bound to it, and no worker subscribes
+
+	post := func(body map[string]any, header ...string) testutil.Resp {
+		return h.Do("POST", "/v1/admin/submissions", h.AdminKey, body, header...)
+	}
+	body := sub("ann", "8.8.8.8", "1d", "g1", "g2")
+	body["realm"] = "r"
+	r := post(body, "IPValet-On-Behalf-Of", "alice")
+	if r.Status != 201 {
+		t.Fatalf("admin submission: %d %s", r.Status, r.Body)
+	}
+	m := r.JSON(t)
+	entries := m["entries"].([]any)
+	if len(entries) != 2 || m["prefix"] != "8.8.8.8/32" {
+		t.Fatalf("response %v", m)
+	}
+	id := entries[0].(map[string]any)["id"].(string)
+	e := adminEntry(h, id)
+	if e["client_id"] != nil || e["state"] != "pending" {
+		t.Fatalf("entry %v", e)
+	}
+	audit := h.Admin(200, "GET", "/v1/admin/audit?action=entry.create&realm=r", nil)["items"].([]any)
+	if len(audit) != 2 {
+		t.Fatalf("audit %v", audit)
+	}
+	for _, a := range audit {
+		a := a.(map[string]any)
+		if a["on_behalf_of"] != "alice" || a["client_id"] != nil || a["actor"] == "" {
+			t.Fatalf("audit row %v", a)
+		}
+	}
+	// The realm's clients see the entries.
+	if list := h.Must(200, "GET", "/v1/entries?user=ann", s.ClientKey, nil)["items"].([]any); len(list) != 2 {
+		t.Fatalf("client view %v", list)
+	}
+	// Submitting again replaces in place.
+	r = post(body)
+	if r.Status != 201 || !r.JSON(t)["entries"].([]any)[0].(map[string]any)["replaced"].(bool) {
+		t.Fatalf("re-submission: %d %s", r.Status, r.Body)
+	}
+
+	// The realm's rules apply.
+	denied := sub("ann", "10.0.0.1", "1d", "g1")
+	denied["realm"] = "r"
+	if r := post(denied); r.Status != 422 || r.Code(t) != "submission_rejected" ||
+		!strings.Contains(string(r.Body), "ip_denied") {
+		t.Fatalf("reserved address: %d %s", r.Status, r.Body)
+	}
+	long := sub("ann", "8.8.4.4", "31d", "g1")
+	long["realm"] = "r"
+	if r := post(long); r.Status != 422 || !strings.Contains(string(r.Body), "ttl_exceeded") {
+		t.Fatalf("long TTL: %d %s", r.Status, r.Body)
+	}
+	// So does routing: no worker takes realm other.
+	unrouted := sub("ann", "8.8.4.4", "1d", "g1")
+	unrouted["realm"] = "other"
+	if r := post(unrouted); r.Status != 422 || !strings.Contains(string(r.Body), "no_subscriber") {
+		t.Fatalf("unrouted: %d %s", r.Status, r.Body)
+	}
+	// The realm is required and must exist.
+	if r := post(sub("ann", "8.8.4.4", "1d", "g1")); r.Status != 400 || r.Code(t) != "invalid_request" {
+		t.Fatalf("no realm: %d %s", r.Status, r.Body)
+	}
+	missing := sub("ann", "8.8.4.4", "1d", "g1")
+	missing["realm"] = "nope"
+	if r := post(missing); r.Status != 400 || !strings.Contains(string(r.Body), "no such realm") {
+		t.Fatalf("unknown realm: %d %s", r.Status, r.Body)
+	}
+	// Client keys cannot use it.
+	body["realm"] = "r"
+	if r := h.Do("POST", "/v1/admin/submissions", s.ClientKey, body); r.Status != 403 {
+		t.Fatalf("client key: %d", r.Status)
+	}
+}
