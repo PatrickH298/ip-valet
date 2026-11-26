@@ -21,6 +21,9 @@ import (
 type desiredEntry struct {
 	Prefix    string  `json:"prefix"`
 	ExpiresAt *string `json:"expires_at"`
+	Realm     string  `json:"realm"`
+	User      string  `json:"user"`
+	Group     string  `json:"group"`
 }
 
 type desiredStateResponse struct {
@@ -58,9 +61,7 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 			return err
 		}
 		rows, err := tx.Query(ctx, `
-			SELECT e.prefix,
-			       CASE WHEN bool_or(e.expires_at IS NULL) THEN NULL
-			            ELSE max(e.expires_at) END AS expires_at
+			SELECT e.prefix, e.expires_at, e.realm, e.username, e.grp
 			FROM entries e
 			WHERE e.deleted_at IS NULL
 			  AND (e.expires_at IS NULL OR e.expires_at > now())
@@ -71,15 +72,14 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 			      AND (s.realm    IS NULL OR s.realm    = e.realm)
 			      AND (s.username IS NULL OR s.username = e.username)
 			      AND (s.grp      IS NULL OR s.grp      = e.grp))
-			GROUP BY e.prefix
-			ORDER BY e.prefix`, p.WorkerID, ipv4, ipv6)
+			ORDER BY e.prefix, e.realm, e.username, e.grp`, p.WorkerID, ipv4, ipv6)
 		if err != nil {
 			return err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var it state.DesiredItem
-			if err := rows.Scan(&it.Prefix, &it.ExpiresAt); err != nil {
+			if err := rows.Scan(&it.Prefix, &it.ExpiresAt, &it.Realm, &it.User, &it.Group); err != nil {
 				return err
 			}
 			items = append(items, it)
@@ -105,7 +105,8 @@ func (s *Server) desiredState(w http.ResponseWriter, r *http.Request, p *auth.Pr
 	resp := desiredStateResponse{Revision: rev, GeneratedAt: gen, Families: families, Entries: make([]desiredEntry, 0, len(items))}
 	var next *time.Time
 	for _, it := range items {
-		resp.Entries = append(resp.Entries, desiredEntry{Prefix: it.Prefix.String(), ExpiresAt: tsPtr(it.ExpiresAt)})
+		resp.Entries = append(resp.Entries, desiredEntry{Prefix: it.Prefix.String(), ExpiresAt: tsPtr(it.ExpiresAt),
+			Realm: it.Realm, User: it.User, Group: it.Group})
 		if it.ExpiresAt != nil && (next == nil || it.ExpiresAt.Before(*next)) {
 			next = it.ExpiresAt
 		}

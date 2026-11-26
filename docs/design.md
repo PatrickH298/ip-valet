@@ -50,7 +50,7 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 **What limits a compromised component**
 
 - A leaked client key can only act inside its realms, and only within the realms' rules.
-- A leaked worker key exposes one worker's address list (prefixes and expiries, never who registered them) and nothing else. It cannot widen its own subscriptions.
+- A leaked worker key exposes one worker's entries (prefixes, expiries, and the realm, user and group of each) and nothing else. It cannot widen its own subscriptions.
 - A compromised API can change desired state for every worker, so each worker keeps its own safety floor (see Worker protocol).
 - Every change is audited with the client, the key id, and the realm, user and group the client asserted. An admin key may also name the person it acts for (`IPValet-On-Behalf-Of`), such as the user signed in to the admin dashboard; that name is as trustworthy as the key.
 
@@ -187,13 +187,15 @@ A worker is registered by an admin, who sets its label, its address families and
   "next_change_at": "2026-11-24T18:05:00Z",
   "families": ["ipv4", "ipv6"],
   "entries": [
-    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z" },
-    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null }
+    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z",
+      "realm": "authentik", "user": "patrick", "group": "fwusers" },
+    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null,
+      "realm": "authentik", "user": "patrick", "group": "fwusers" }
   ]
 }
 ```
 
-- One item per distinct prefix among the worker's matching, unexpired, undeleted entries, limited to its families. When several entries share a prefix, it carries the latest expiry (`null` if any is unlimited). The list says nothing about who registered a prefix.
+- One item per matching, unexpired, undeleted entry, limited to the worker's families, with the realm, user and group it was registered for. Several items can share a prefix. A worker that routes entries into several places (several firewall lists, say) does so by its own rules on realm, user and group, and rejects with `no_matching_rule` what none of its rules takes.
 - `next_change_at` is the earliest future expiry in the set, so the worker re-fetches the moment something expires rather than on its next timer.
 - The response carries an `ETag` derived from its contents; a re-fetch with `If-None-Match` returns 304 when nothing changed for this worker. The 304 still carries the current revision and `generated_at` in headers, so the worker can report it is up to date.
 
@@ -307,6 +309,7 @@ A client sees, replaces and deletes everything in its realms, including entries 
 | `address_not_allowed` | Worker | Outside the worker's safety floor |
 | `family_unsupported` | Worker | The worker cannot apply this address family |
 | `capacity_exceeded` | Worker | The worker has no room for it (for example, a full firewall object) |
+| `no_matching_rule` | Worker | None of the worker's own rules takes the entry's realm, user and group |
 | `invalid` | Worker | Refused for another reason |
 
 ## Operations

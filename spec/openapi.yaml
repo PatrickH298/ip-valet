@@ -33,8 +33,9 @@ info:
     subscriptions: (realm, user, group) selectors, each a name or `*`. An
     entry is routed to every worker that applies its family and has a
     subscription matching it. A worker key is bound to one worker; the
-    worker reads only its own desired state (prefixes and expiries, never who
-    registered them) and reports back which revision it has applied. Where a
+    worker reads only its own desired state (each entry's prefix, expiry,
+    realm, user and group, so it can route entries by its own rules) and
+    reports back which revision it has applied. Where a
     worker applies its list, such as a firewall, is up to the worker; the API
     has no notion of it.
 
@@ -1851,8 +1852,10 @@ components:
         `address_not_allowed`: outside the worker's safety floor.
         `family_unsupported`: the worker cannot apply this address family.
         `capacity_exceeded`: the worker has no room for it (for example, a full
-        firewall object). `invalid`: refused for another reason.
-      enum: [prefix_too_broad, address_not_allowed, family_unsupported, capacity_exceeded, invalid]
+        firewall object). `no_matching_rule`: none of the worker's own rules
+        takes the entry's realm, user and group. `invalid`: refused for
+        another reason.
+      enum: [prefix_too_broad, address_not_allowed, family_unsupported, capacity_exceeded, no_matching_rule, invalid]
     ImpactEffect:
       type: string
       enum: [unrouted, ip_denied, prefix_too_broad, ttl_exceeded, cap_exceeded]
@@ -2056,12 +2059,18 @@ components:
           items: { type: string, enum: [ipv4, ipv6] }
         entries:
           type: array
+          description: |
+            One item per live, unexpired entry routed to the worker, ordered by
+            prefix, realm, user and group. Several items may share a prefix.
           items:
             type: object
-            required: [prefix, expires_at]
+            required: [prefix, expires_at, realm, user, group]
             properties:
               prefix: { $ref: "#/components/schemas/Prefix" }
               expires_at: { $ref: "#/components/schemas/NullableTimestamp" }
+              realm: { $ref: "#/components/schemas/RealmName" }
+              user: { $ref: "#/components/schemas/Ident" }
+              group: { $ref: "#/components/schemas/Ident" }
     ChangedEvent:
       type: object
       required: [revision]
