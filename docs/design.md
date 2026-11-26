@@ -385,13 +385,15 @@ Questions that were open in the first draft, and how they were settled.
 | Who sets a worker's subscriptions | An admin. A worker cannot read or change its own subscriptions. |
 | Target vs worker | The API knows only workers; where a worker applies its list is the worker's concern. |
 
-**Deferred to each worker type**
+**Decided per worker type**
 
-- Whether the desired-state cache persists across restarts.
-- Where firewall connection details and credentials live (worker secrets are the expected default; routing stays in the API).
-- Safety floor defaults.
-- UniFi: one worker holding both families across two lists, or one worker per family.
-- UniFi: handling an empty list (the controller refuses one).
+- Whether the desired-state cache persists across restarts: the UniFi worker keeps it in its data volume, so entries still expire on time while the API is down, across restarts too.
+- Where firewall connection details and credentials live: in the worker's environment (or Docker secrets); routing stays in the API, and placement into firewall objects in the worker's own rules.
+- Safety floor defaults: the UniFi worker never applies reserved space (the ranges the API's default IP rules deny, except private ranges a rule asks for) and rejects prefixes broader than /24 (IPv4) or /48 (IPv6).
+- UniFi: one worker holds both families. Its rules (realm, user, group, family, public/private) name an IPv4 and an IPv6 traffic matching list, and an entry goes into the lists of every rule that takes it.
+- UniFi: an empty list (the controller refuses one) holds a never-routed placeholder, 192.0.2.1 or 100::1.
+
+See [the UniFi worker's README](../workers/unifi/README.md).
 
 **Deferred to each client**
 

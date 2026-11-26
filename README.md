@@ -6,4 +6,5 @@ Simple IP registration service.
 - [OpenAPI contract](spec/openapi.yaml) for workers and clients
 - [API server](api/README.md): configuration, commands and development
 - [Admin dashboard](dashboard/README.md), and its [design](docs/dashboard.md)
+- [UniFi worker](workers/unifi/README.md): keeps UniFi traffic matching lists in line with registered addresses
 - [Deployment](deploy/README.md): a hardened Compose setup
