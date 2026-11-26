@@ -1,10 +1,11 @@
-# Weekly update pull requests for the Go modules of the API server and the
-# dashboard, the pinned GitHub Actions and the images' base images. Interim: to be replaced by Renovate.
+# Weekly update pull requests for the Go modules of the API server, the
+# dashboard and the UniFi worker, the pinned GitHub Actions and the images'
+# base images. Interim: to be replaced by Renovate.
 # Known vulnerabilities are caught independently by govulncheck in CI.
 version: 2
 updates:
   - package-ecosystem: gomod
-    directories: [/api, /dashboard]
+    directories: [/api, /dashboard, /workers/unifi]
     schedule:
       interval: weekly
     groups:
@@ -20,7 +21,7 @@ updates:
         patterns: ["*"]
 
   - package-ecosystem: docker
-    directories: [/api, /dashboard]
+    directories: [/api, /dashboard, /workers/unifi]
     schedule:
       interval: weekly
     groups:

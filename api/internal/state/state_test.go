@@ -47,6 +47,18 @@ func TestETag(t *testing.T) {
 	if a == ETag([]string{"ipv4"}, items) || a == ETag([]string{"ipv4", "ipv6"}, items[:1]) {
 		t.Fatal("ETag ignores families or items")
 	}
+	// Who an entry belongs to is part of the state: workers route by it.
+	moved := append([]DesiredItem(nil), items...)
+	moved[0].Group = "other"
+	if a == ETag([]string{"ipv4", "ipv6"}, moved) {
+		t.Fatal("ETag ignores the group")
+	}
+	// Names cannot run together: "a b"+"c" differs from "a"+"b c".
+	x := []DesiredItem{{Prefix: items[1].Prefix, Realm: "r", User: "a b", Group: "c"}}
+	y := []DesiredItem{{Prefix: items[1].Prefix, Realm: "r", User: "a", Group: "b c"}}
+	if ETag(nil, x) == ETag(nil, y) {
+		t.Fatal("ETag runs names together")
+	}
 }
 
 func TestRemovalConfirmationUsesRecords(t *testing.T) {

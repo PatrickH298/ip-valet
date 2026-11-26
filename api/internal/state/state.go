@@ -5,6 +5,7 @@ package state
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"net/netip"
 	"sort"
 	"strings"
@@ -29,7 +30,8 @@ const (
 var AllStates = []string{Active, Pending, Partial, Rejected, Unrouted, Removing, Removed, Expired}
 
 // Worker rejection codes accepted in status reports.
-var WorkerCodes = []string{"prefix_too_broad", "address_not_allowed", "family_unsupported", "capacity_exceeded", "invalid"}
+var WorkerCodes = []string{"prefix_too_broad", "address_not_allowed", "family_unsupported", "capacity_exceeded",
+	"no_matching_rule", "invalid"}
 
 // Entry is one entries row.
 type Entry struct {
@@ -260,10 +262,14 @@ func EntryState(e *Entry, workers []Worker, rej Rejections, rem Removals, now ti
 	}
 }
 
-// DesiredItem is one prefix in a worker's desired state.
+// DesiredItem is one entry in a worker's desired state: its prefix, expiry,
+// and the realm, user and group it was registered for.
 type DesiredItem struct {
 	Prefix    netip.Prefix
 	ExpiresAt *time.Time
+	Realm     string
+	User      string
+	Group     string
 }
 
 // FormatTime renders a timestamp as RFC 3339 UTC, keeping sub-second digits when present.
@@ -284,20 +290,21 @@ func Families(ipv4, ipv6 bool) []string {
 	return out
 }
 
-// ETag is a quoted hex SHA-256 over the families line and one "prefix expires_at"
-// line per item ("-" for no expiry). It excludes revision and generated_at.
+// ETag is a quoted hex SHA-256 over the families line and one line per item:
+// a JSON array of prefix, expires_at ("-" for no expiry), realm, user and
+// group (JSON, since user and group names may hold any printable character).
+// It excludes revision and generated_at.
 func ETag(families []string, items []DesiredItem) string {
 	var b strings.Builder
 	b.WriteString(strings.Join(families, ","))
 	b.WriteByte('\n')
 	for _, it := range items {
-		b.WriteString(it.Prefix.String())
-		b.WriteByte(' ')
-		if it.ExpiresAt == nil {
-			b.WriteByte('-')
-		} else {
-			b.WriteString(FormatTime(*it.ExpiresAt))
+		exp := "-"
+		if it.ExpiresAt != nil {
+			exp = FormatTime(*it.ExpiresAt)
 		}
+		line, _ := json.Marshal([]string{it.Prefix.String(), exp, it.Realm, it.User, it.Group})
+		b.Write(line)
 		b.WriteByte('\n')
 	}
 	sum := sha256.Sum256([]byte(b.String()))

@@ -16,7 +16,7 @@ Build the ip-valet API server: one Go binary that owns the Postgres database and
 4. A `Dockerfile` producing a minimal, non-root image.
 5. Tests covering every item in Acceptance tests, runnable with `go test ./...` against a disposable Postgres named by `IPVALET_TEST_DATABASE_URL` (in CI, where `CI` is set, a missing URL fails the tests instead of skipping them).
 6. A `README.md` in `api/` listing the environment variables and commands.
-7. `.github/workflows/ci.yml`: on every pull request, push to `main`, release tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) for each component that changed (`api/`, and `dashboard/`, whose tests also run the API server; a change to `spec/` or the workflow checks both); check DCO sign-offs on pull requests; build each image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-<component>` from `main` (`main`, `sha-<commit>`) and from `<component>/vX.Y.Z` tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check. Pull requests from `dependabot[bot]` and `renovate[bot]` skip the DCO check. `.github/dependabot.yml` opens weekly grouped updates for Go modules, the pinned actions and the base images.
+7. `.github/workflows/ci.yml`: on every pull request, push to `main`, release tag and weekly, run gofmt, `go mod tidy -diff`, `go vet`, staticcheck, govulncheck, the build and the tests (with a Postgres 16 service and the race detector) for each component that changed (`api/`, and `dashboard/` and `workers/unifi/`, whose tests also run the API server; a change to `api/`, `spec/` or the workflow checks all three); check DCO sign-offs on pull requests; build each image and smoke-test it, pushing it to `ghcr.io/<owner>/ip-valet-api`, `-dashboard` or `-unifi` from `main` (`main`, `sha-<commit>`) and from `<directory>/vX.Y.Z` tags (`X.Y.Z`, `latest`); end in the `CI summary` job, the one required check. Pull requests from `dependabot[bot]` and `renovate[bot]` skip the DCO check. `.github/dependabot.yml` opens weekly grouped updates for Go modules, the pinned actions and the base images.
 
 **Definition of done**
 
@@ -504,9 +504,7 @@ All three require a worker key; the worker is the key's worker.
 ```sql
 SELECT value FROM revision_counter;          -- R
 SELECT now();                                -- generated_at (database time)
-SELECT e.prefix,
-       CASE WHEN bool_or(e.expires_at IS NULL) THEN NULL
-            ELSE max(e.expires_at) END AS expires_at
+SELECT e.prefix, e.expires_at, e.realm, e.username, e.grp
 FROM entries e
 WHERE e.deleted_at IS NULL
   AND (e.expires_at IS NULL OR e.expires_at > now())
@@ -517,8 +515,7 @@ WHERE e.deleted_at IS NULL
       AND (s.realm    IS NULL OR s.realm    = e.realm)
       AND (s.username IS NULL OR s.username = e.username)
       AND (s.grp      IS NULL OR s.grp      = e.grp))
-GROUP BY e.prefix
-ORDER BY e.prefix;
+ORDER BY e.prefix, e.realm, e.username, e.grp;
 ```
 
 Response 200:
@@ -530,15 +527,18 @@ Response 200:
   "next_change_at": "2026-11-25T17:00:00Z",
   "families": ["ipv4", "ipv6"],
   "entries": [
-    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z" },
-    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null }
+    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z",
+      "realm": "authentik", "user": "patrick", "group": "fwusers" },
+    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null,
+      "realm": "authentik", "user": "patrick", "group": "fwusers" }
   ]
 }
 ```
 
 - `next_change_at`: the earliest non-null `expires_at` in `entries`, or null.
 - Timestamps are RFC 3339 in UTC; `generated_at` keeps microseconds.
-- `ETag`: a quoted hex SHA-256 over `families` plus each entry as `prefix expires_at` (`-` for null), one per line in the order above. It excludes `revision` and `generated_at`, so it changes only when this worker's content changes.
+- One item per entry; several can share a prefix. Each carries the entry's realm, user and group, so a worker can route entries by its own rules.
+- `ETag`: a quoted hex SHA-256 over `families` plus each entry as a JSON array `[prefix, expires_at, realm, user, group]` (`-` for a null expiry), one per line in the order above. It excludes `revision` and `generated_at`, so it changes only when this worker's content changes.
 - Headers on every response, 200 or 304: `IPValet-Revision: <R>`, `IPValet-Generated-At: <generated_at>`.
 - `If-None-Match` equal to the current ETag → 304 with no body. The worker still reports status with the revision and time from those headers, since its state is current at that revision.
 
@@ -770,7 +770,7 @@ Every error response has the same envelope; `results`, `impact` and `fields` app
 
 **Submission result codes** (in `results[].code`), in check order: `realm_not_allowed`, `invalid_prefix`, `no_subscriber`, `ip_denied`, `prefix_too_broad`, `ttl_exceeded`, `cap_exceeded`.
 
-**Worker rejection codes** (accepted in status reports, shown to clients as `workers[].code`): `prefix_too_broad`, `address_not_allowed`, `family_unsupported`, `capacity_exceeded`, `invalid`.
+**Worker rejection codes** (accepted in status reports, shown to clients as `workers[].code`): `prefix_too_broad`, `address_not_allowed`, `family_unsupported`, `capacity_exceeded`, `no_matching_rule`, `invalid`.
 
 **Impact effects and actions**: `ip_denied`, `prefix_too_broad`, `cap_exceeded` → `remove`; `ttl_exceeded` → `shorten`; `unrouted` → `none`.
 

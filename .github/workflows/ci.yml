@@ -3,10 +3,11 @@
 # the main branch ruleset should require (a required check that never runs
 # would block merging).
 #
-# Components: api/ and dashboard/, each a Go module with its own image
-# (ghcr.io/<owner>/ip-valet-<component>) and release tags (<component>/vX.Y.Z).
-# The dashboard's tests run against the API server built from api/, so an API
-# change also tests the dashboard.
+# Components: api/, dashboard/ and workers/unifi/, each a Go module with its
+# own image (ghcr.io/<owner>/ip-valet-api, -dashboard, -unifi) and release
+# tags (<directory>/vX.Y.Z, for example workers/unifi/v0.1.0). The dashboard's
+# and the worker's tests run against the API server built from api/, so an
+# API change tests them too.
 #
 # Images: built on every pull request (not pushed), pushed to GHCR on every
 # push to main, on release tags and weekly, so images pick up base-image
@@ -22,7 +23,7 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ["api/v*", "dashboard/v*"]
+    tags: ["api/v*", "dashboard/v*", "workers/unifi/v*"]
   schedule:
     - cron: "23 3 * * 1" # Mondays 03:23 UTC
   workflow_dispatch:
@@ -60,10 +61,15 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          all='["api","dashboard"]'
+          all='[{"name":"api","dir":"api","image":"ip-valet-api"},
+                {"name":"dashboard","dir":"dashboard","image":"ip-valet-dashboard"},
+                {"name":"unifi","dir":"workers/unifi","image":"ip-valet-unifi"}]'
+          # pick NAME... prints the components with those names, as JSON.
+          pick() { jq -nc --argjson all "$all" '$all | map(select(.name as $n | $ARGS.positional | index($n)))' --args "$@"; }
           case "$REF" in
-            refs/tags/api/v*) echo 'components=["api"]' >> "$GITHUB_OUTPUT"; exit 0 ;;
-            refs/tags/dashboard/v*) echo 'components=["dashboard"]' >> "$GITHUB_OUTPUT"; exit 0 ;;
+            refs/tags/api/v*) echo "components=$(pick api)" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            refs/tags/dashboard/v*) echo "components=$(pick dashboard)" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            refs/tags/workers/unifi/v*) echo "components=$(pick unifi)" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           range=""
           case "$EVENT" in
@@ -78,15 +84,16 @@ jobs:
           esac
           if [ -z "$range" ]; then
             echo "Event $EVENT on $REF: checking every component."
-            echo "components=$all" >> "$GITHUB_OUTPUT"
+            echo "components=$(pick api dashboard unifi)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files="$(git diff --name-only "$range")"
           printf 'Changed files (%s):\n%s\n' "$range" "$files"
-          components=()
-          if grep -qE '^(api/|spec/|\.github/workflows/)' <<<"$files"; then components+=(api); fi
-          if grep -qE '^(dashboard/|api/|spec/|\.github/workflows/)' <<<"$files"; then components+=(dashboard); fi
-          json="$(printf '%s\n' "${components[@]}" | jq -R 'select(length > 0)' | jq -sc .)"
+          names=()
+          if grep -qE '^(api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(api); fi
+          if grep -qE '^(dashboard/|api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(dashboard); fi
+          if grep -qE '^(workers/unifi/|api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(unifi); fi
+          json="$(pick "${names[@]}")"
           echo "Components to check: $json"
           echo "components=$json" >> "$GITHUB_OUTPUT"
 
@@ -123,7 +130,7 @@ jobs:
           echo "Every commit is signed off."
 
   test:
-    name: Checks and tests (${{ matrix.component }})
+    name: Checks and tests (${{ matrix.component.name }})
     needs: changes
     if: needs.changes.outputs.components != '[]'
     strategy:
@@ -133,7 +140,7 @@ jobs:
     runs-on: ubuntu-24.04
     defaults:
       run:
-        working-directory: ${{ matrix.component }}
+        working-directory: ${{ matrix.component.dir }}
     services:
       postgres:
         image: postgres:16
@@ -154,10 +161,10 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
-          go-version-file: ${{ matrix.component }}/go.mod
-          # The dashboard's tests build the API server too.
+          go-version-file: ${{ matrix.component.dir }}/go.mod
+          # The dashboard's and the worker's tests build the API server too.
           cache-dependency-path: |
-            ${{ matrix.component }}/go.sum
+            ${{ matrix.component.dir }}/go.sum
             api/go.sum
       - name: gofmt
         run: |
@@ -179,7 +186,7 @@ jobs:
         run: go test -race -count=1 ./...
 
   image:
-    name: Image (${{ matrix.component }})
+    name: Image (${{ matrix.component.name }})
     needs: [changes, test]
     if: needs.changes.outputs.components != '[]'
     strategy:
@@ -198,19 +205,20 @@ jobs:
         id: meta
         env:
           OWNER: ${{ github.repository_owner }}
-          COMPONENT: ${{ matrix.component }}
+          DIR: ${{ matrix.component.dir }}
+          IMAGE_NAME: ${{ matrix.component.image }}
           REF: ${{ github.ref }}
           EVENT: ${{ github.event_name }}
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          image="ghcr.io/${OWNER,,}/ip-valet-$COMPONENT"
+          image="ghcr.io/${OWNER,,}/$IMAGE_NAME"
           short="${SHA:0:12}"
           push=false
           tags=""
           version="dev-$short"
-          if [[ "$REF" == refs/tags/$COMPONENT/v* ]]; then
-            version="${REF#refs/tags/$COMPONENT/v}"
+          if [[ "$REF" == refs/tags/$DIR/v* ]]; then
+            version="${REF#refs/tags/$DIR/v}"
             tags="$version latest"
             push=true
           elif [[ "$REF" == refs/heads/main ]] && [[ "$EVENT" != pull_request ]]; then
@@ -224,9 +232,9 @@ jobs:
             echo "push=$push"
           } >> "$GITHUB_OUTPUT"
       - name: Build
-        working-directory: ${{ matrix.component }}
+        working-directory: ${{ matrix.component.dir }}
         env:
-          COMPONENT: ${{ matrix.component }}
+          COMPONENT: ${{ matrix.component.name }}
           VERSION: ${{ steps.meta.outputs.version }}
           SHA: ${{ github.sha }}
           SOURCE: ${{ github.server_url }}/${{ github.repository }}
@@ -242,14 +250,14 @@ jobs:
             -t "ip-valet-$COMPONENT:ci" .
       - name: Smoke test
         env:
-          COMPONENT: ${{ matrix.component }}
+          COMPONENT: ${{ matrix.component.name }}
         run: |
           docker run --rm "ip-valet-$COMPONENT:ci" version
           test "$(docker inspect -f '{{.Config.User}}' "ip-valet-$COMPONENT:ci")" = "nonroot:nonroot"
       - name: Push to GHCR
         if: steps.meta.outputs.push == 'true'
         env:
-          COMPONENT: ${{ matrix.component }}
+          COMPONENT: ${{ matrix.component.name }}
           IMAGE: ${{ steps.meta.outputs.image }}
           TAGS: ${{ steps.meta.outputs.tags }}
           ACTOR: ${{ github.actor }}

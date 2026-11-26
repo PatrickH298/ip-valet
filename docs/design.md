@@ -50,7 +50,7 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 **What limits a compromised component**
 
 - A leaked client key can only act inside its realms, and only within the realms' rules.
-- A leaked worker key exposes one worker's address list (prefixes and expiries, never who registered them) and nothing else. It cannot widen its own subscriptions.
+- A leaked worker key exposes one worker's entries (prefixes, expiries, and the realm, user and group of each) and nothing else. It cannot widen its own subscriptions.
 - A compromised API can change desired state for every worker, so each worker keeps its own safety floor (see Worker protocol).
 - Every change is audited with the client, the key id, and the realm, user and group the client asserted. An admin key may also name the person it acts for (`IPValet-On-Behalf-Of`), such as the user signed in to the admin dashboard; that name is as trustworthy as the key.
 
@@ -187,13 +187,15 @@ A worker is registered by an admin, who sets its label, its address families and
   "next_change_at": "2026-11-24T18:05:00Z",
   "families": ["ipv4", "ipv6"],
   "entries": [
-    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z" },
-    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null }
+    { "prefix": "203.0.113.7/32", "expires_at": "2026-11-25T17:00:00Z",
+      "realm": "authentik", "user": "patrick", "group": "fwusers" },
+    { "prefix": "2001:db8:1234:5678::/64", "expires_at": null,
+      "realm": "authentik", "user": "patrick", "group": "fwusers" }
   ]
 }
 ```
 
-- One item per distinct prefix among the worker's matching, unexpired, undeleted entries, limited to its families. When several entries share a prefix, it carries the latest expiry (`null` if any is unlimited). The list says nothing about who registered a prefix.
+- One item per matching, unexpired, undeleted entry, limited to the worker's families, with the realm, user and group it was registered for. Several items can share a prefix. A worker that routes entries into several places (several firewall lists, say) does so by its own rules on realm, user and group, and rejects with `no_matching_rule` what none of its rules takes.
 - `next_change_at` is the earliest future expiry in the set, so the worker re-fetches the moment something expires rather than on its next timer.
 - The response carries an `ETag` derived from its contents; a re-fetch with `If-None-Match` returns 304 when nothing changed for this worker. The 304 still carries the current revision and `generated_at` in headers, so the worker can report it is up to date.
 
@@ -307,6 +309,7 @@ A client sees, replaces and deletes everything in its realms, including entries 
 | `address_not_allowed` | Worker | Outside the worker's safety floor |
 | `family_unsupported` | Worker | The worker cannot apply this address family |
 | `capacity_exceeded` | Worker | The worker has no room for it (for example, a full firewall object) |
+| `no_matching_rule` | Worker | None of the worker's own rules takes the entry's realm, user and group |
 | `invalid` | Worker | Refused for another reason |
 
 ## Operations
@@ -382,13 +385,15 @@ Questions that were open in the first draft, and how they were settled.
 | Who sets a worker's subscriptions | An admin. A worker cannot read or change its own subscriptions. |
 | Target vs worker | The API knows only workers; where a worker applies its list is the worker's concern. |
 
-**Deferred to each worker type**
+**Decided per worker type**
 
-- Whether the desired-state cache persists across restarts.
-- Where firewall connection details and credentials live (worker secrets are the expected default; routing stays in the API).
-- Safety floor defaults.
-- UniFi: one worker holding both families across two lists, or one worker per family.
-- UniFi: handling an empty list (the controller refuses one).
+- Whether the desired-state cache persists across restarts: the UniFi worker keeps it in its data volume, so entries still expire on time while the API is down, across restarts too.
+- Where firewall connection details and credentials live: in the worker's environment (or Docker secrets); routing stays in the API, and placement into firewall objects in the worker's own rules.
+- Safety floor defaults: the UniFi worker never applies reserved space (the ranges the API's default IP rules deny, except private ranges a rule asks for) and rejects prefixes broader than /24 (IPv4) or /48 (IPv6).
+- UniFi: one worker holds both families. Its rules (realm, user, group, family, public/private) name an IPv4 and an IPv6 traffic matching list, and an entry goes into the lists of every rule that takes it.
+- UniFi: an empty list (the controller refuses one) holds a never-routed placeholder, 192.0.2.1 or 100::1.
+
+See [the UniFi worker's README](../workers/unifi/README.md).
 
 **Deferred to each client**
 

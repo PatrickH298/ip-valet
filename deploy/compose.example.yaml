@@ -1,5 +1,5 @@
-# Example deployment of ip-valet: Postgres, the API server and the admin
-# dashboard. See deploy/README.md for the first start.
+# Example deployment of ip-valet: Postgres, the API server, the admin
+# dashboard and the UniFi worker. See deploy/README.md for the first start.
 #
 # Every setting is an environment variable. The required ones are set below;
 # every optional one is listed commented out, with its default and what it
@@ -8,7 +8,7 @@
 # secret: each service shows the commented-out lines for that, and the
 # secrets themselves are defined, commented out, at the end of this file.
 #
-# All three services share the project's default network, so any container
+# All services share the project's default network, so any container
 # on it reaches the API directly at http://api:8080 (client and worker API)
 # and http://api:8081 (admin API).
 
@@ -35,7 +35,7 @@ services:
       retries: 20
 
   api:
-    image: ghcr.io/patrickh298/ip-valet-api:0.1.0
+    image: ghcr.io/patrickh298/ip-valet-api:main # built from main; pin a release tag once there is one
     restart: unless-stopped
     depends_on:
       db:
@@ -106,7 +106,7 @@ services:
       # - "9090:9090" # Prometheus metrics
 
   dashboard:
-    image: ghcr.io/patrickh298/ip-valet-dashboard:main # pin a release tag once one exists
+    image: ghcr.io/patrickh298/ip-valet-dashboard:main # built from main; pin a release tag once there is one
     restart: unless-stopped
     depends_on: [api]
     read_only: true
@@ -154,6 +154,75 @@ services:
     ports:
       - "8090:8090" # dashboard
 
+  unifi:
+    image: ghcr.io/patrickh298/ip-valet-unifi:main # built from main; pin a release tag once there is one
+    restart: unless-stopped
+    depends_on: [api]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      # (required) URL of the ip-valet API's main listener (client and worker API).
+      IPVALET_UNIFI_API_URL: http://api:8080
+      # (required, secret) The worker's key. Create the worker in the dashboard
+      # (Workers), subscribe it to what it should receive, create a key on its
+      # page and paste it here; the worker does not start without it.
+      IPVALET_UNIFI_API_KEY: ""
+      # IPVALET_UNIFI_API_KEY_FILE: /run/secrets/unifi_worker_key
+      # (required) The UniFi Network integration API. A local console:
+      #   https://<console address>/proxy/network/integration
+      # or the cloud connector:
+      #   https://api.ui.com/v1/connector/consoles/<console id>/proxy/network/integration
+      IPVALET_UNIFI_CONTROLLER_URL: https://192.168.1.1/proxy/network/integration
+      # (required, secret) A UniFi API key (UniFi Network: Settings > Control
+      # Plane > Integrations; cloud: unifi.ui.com > API). It can reach the whole
+      # Network API, so give it to this worker only.
+      IPVALET_UNIFI_CONTROLLER_KEY: ""
+      # IPVALET_UNIFI_CONTROLLER_KEY_FILE: /run/secrets/unifi_controller_key
+      # (at least one) Rules: IPVALET_UNIFI_RULE_<NAME>, each space-separated
+      # key=value pairs; an entry goes into the lists of every rule that takes it.
+      #   realm      the realm, by name (required; * is not allowed)
+      #   user       a user name, or * for any (default *)
+      #   group      a group name, or * for any (default *)
+      #   family     ipv4, ipv6 or both (default both)
+      #   addresses  public, private or both (default public)
+      #   ipv4_list  the UniFi IPv4 list, by name or id, that receives matching IPv4 entries
+      #   ipv6_list  the UniFi IPv6 list, by name or id, that receives matching IPv6 entries
+      # Quote a value with spaces: user="Zoë Smith". The worker replaces the
+      # contents of every list a rule names; lists named in no rule are untouched.
+      IPVALET_UNIFI_RULE_DEFAULT: realm=default ipv4_list=ip-valet-v4 ipv6_list=ip-valet-v6
+      # IPVALET_UNIFI_RULE_LAB: realm=default group=lab family=ipv4 addresses=private ipv4_list=ip-valet-lab
+
+      # ---- Optional; the values shown are the defaults ----
+      # The UniFi site, by name or id.
+      # IPVALET_UNIFI_SITE: Default
+      # Check the controller's TLS certificate. false accepts a local console's
+      # self-signed certificate; it is refused for the cloud connector.
+      # IPVALET_UNIFI_VERIFY_TLS: "true"
+      # Create lists that rules name, by name, when they do not exist yet
+      # (lists named by id are never created).
+      # IPVALET_UNIFI_CREATE_LISTS: "true"
+      # Broadest IPv4 prefix the worker applies; broader ones are rejected.
+      # IPVALET_UNIFI_MIN_PREFIX_V4: "24"
+      # Broadest IPv6 prefix the worker applies; broader ones are rejected.
+      # IPVALET_UNIFI_MIN_PREFIX_V6: "48"
+      # Sync at least this often, besides change signals and expiries.
+      # IPVALET_UNIFI_SYNC_INTERVAL: 1m
+      # Timeout for each request to the API or the controller.
+      # IPVALET_UNIFI_TIMEOUT: 15s
+      # Writable directory for the cached desired state, so entries still expire
+      # on time while the API is down, across restarts too. Empty keeps it in memory.
+      # IPVALET_UNIFI_DATA_DIR: /data
+      # Name reported to the API, to tell processes sharing the worker's keys
+      # apart. Default: the container's host name.
+      # IPVALET_UNIFI_INSTANCE: ""
+      # Log level: debug, info, warn or error.
+      # IPVALET_UNIFI_LOG_LEVEL: info
+    # secrets: [unifi_worker_key, unifi_controller_key]
+    volumes:
+      # The cached desired state.
+      - unifi-data:/data
+
     # To also join a network that already exists, such as one shared with a
     # reverse proxy or another stack, list it on each service that needs it:
     # networks: [default, shared]
@@ -165,10 +234,11 @@ services:
 volumes:
   db-data:
   dashboard-data:
+  unifi-data:
 
 # Secrets, for the *_FILE variables above. Each file holds one value; the
-# containers read them as /run/secrets/<name>. The API and the dashboard run
-# as uid 65532 and Postgres as uid 999, so each file must be readable by its
+# containers read them as /run/secrets/<name>. The API, the dashboard and the
+# UniFi worker run as uid 65532 and Postgres as uid 999, so each file must be readable by its
 # service's user.
 #
 # secrets:
@@ -180,3 +250,7 @@ volumes:
 #     file: ./secrets/ipvalet_admin_key
 #   dashboard_api_key:
 #     file: ./secrets/dashboard_api_key
+#   unifi_worker_key:
+#     file: ./secrets/unifi_worker_key
+#   unifi_controller_key:
+#     file: ./secrets/unifi_controller_key

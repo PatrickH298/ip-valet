@@ -170,6 +170,9 @@ func TestDesiredState(t *testing.T) {
 		Entries      []struct {
 			Prefix    string  `json:"prefix"`
 			ExpiresAt *string `json:"expires_at"`
+			Realm     string  `json:"realm"`
+			User      string  `json:"user"`
+			Group     string  `json:"group"`
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal(r.Body, &ds); err != nil {
@@ -178,18 +181,28 @@ func TestDesiredState(t *testing.T) {
 	if ds.Revision != h.Revision() || len(ds.Families) != 1 || ds.Families[0] != "ipv4" {
 		t.Fatalf("revision/families: %+v", ds)
 	}
-	if len(ds.Entries) != 2 || ds.Entries[0].Prefix != "8.8.8.1/32" || ds.Entries[1].Prefix != "8.8.8.2/32" {
+	// One item per live, unexpired entry, with who it belongs to, ordered by
+	// prefix, realm, user and group.
+	want := [][4]string{{"8.8.8.1/32", "g1"}, {"8.8.8.1/32", "g2"}, {"8.8.8.2/32", "g1"}, {"8.8.8.2/32", "g2"}}
+	if len(ds.Entries) != len(want) {
 		t.Fatalf("entries = %s", r.Body)
 	}
-	g2Expiry := adminEntryByPrefix(h, "8.8.8.1/32", "g2")["expires_at"].(string)
-	if ds.Entries[0].ExpiresAt == nil || *ds.Entries[0].ExpiresAt != g2Expiry {
-		t.Fatalf("8.8.8.1 expiry %v, want the latest %s", ds.Entries[0].ExpiresAt, g2Expiry)
+	for i, w := range want {
+		e := ds.Entries[i]
+		if e.Prefix != w[0] || e.Group != w[1] || e.Realm != "r" || e.User != "p" {
+			t.Fatalf("entry %d = %+v, want %v", i, e, w)
+		}
+		exp := adminEntryByPrefix(h, w[0], w[1])["expires_at"]
+		if (exp == nil) != (e.ExpiresAt == nil) || (exp != nil && *e.ExpiresAt != exp.(string)) {
+			t.Fatalf("entry %d expiry %v, want %v", i, e.ExpiresAt, exp)
+		}
 	}
-	if ds.Entries[1].ExpiresAt != nil {
-		t.Fatalf("8.8.8.2 should be unlimited: %v", *ds.Entries[1].ExpiresAt)
+	if ds.Entries[3].ExpiresAt != nil {
+		t.Fatalf("8.8.8.2 g2 should be unlimited: %v", *ds.Entries[3].ExpiresAt)
 	}
-	if ds.NextChangeAt == nil || *ds.NextChangeAt != g2Expiry {
-		t.Fatalf("next_change_at = %v, want %s", ds.NextChangeAt, g2Expiry)
+	first := adminEntryByPrefix(h, "8.8.8.1/32", "g1")["expires_at"].(string)
+	if ds.NextChangeAt == nil || *ds.NextChangeAt != first {
+		t.Fatalf("next_change_at = %v, want the earliest expiry %s", ds.NextChangeAt, first)
 	}
 	if !strings.HasSuffix(ds.GeneratedAt, "Z") || len(ds.GeneratedAt) != len("2006-01-02T15:04:05.000000Z") {
 		t.Fatalf("generated_at %q must be RFC 3339 UTC with microseconds", ds.GeneratedAt)
@@ -579,5 +592,20 @@ func TestEventStreamLimits(t *testing.T) {
 				t.Fatalf("%s stream still open after its key was revoked", name)
 			}
 		}
+	}
+}
+
+// TestNoMatchingRule: a worker that routes by its own rules reports entries
+// none of them takes as no_matching_rule, and clients see the code.
+func TestNoMatchingRule(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	s := h.Basic("r")
+	id := firstEntryID(submitOK(h, s.ClientKey, sub("p", "8.8.8.8", "1d", "g")))
+	h.Apply(s.WorkerKey, map[string]any{"prefix": "8.8.8.8/32", "code": "no_matching_rule", "detail": "no rule for realm r"})
+	e := h.Must(200, "GET", "/v1/entries/"+id, s.ClientKey, nil)
+	w := e["workers"].([]any)[0].(map[string]any)
+	if e["state"] != "rejected" || w["state"] != "rejected" || w["code"] != "no_matching_rule" {
+		t.Fatalf("entry %v", e)
 	}
 }
