@@ -122,7 +122,7 @@ fieldset { border: 1px solid var(--line); border-radius: 6px; padding: 0.5rem 0.
 legend { color: var(--muted); font-size: 0.9rem; padding: 0 0.3rem; }
 .err { color: var(--bad); font-size: 0.85rem; }
 
-input, select {
+input, select, textarea {
   font: inherit;
   color: var(--text);
   background: var(--panel);

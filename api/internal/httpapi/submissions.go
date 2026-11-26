@@ -68,6 +68,8 @@ func parseSubmission(p *auth.Principal, req *submissionRequest) (*validSubmissio
 			fe.add("realm", "must match ^[a-z0-9][a-z0-9._-]{0,62}$")
 		}
 		v.realm = *req.Realm
+	case p.Kind == auth.KindAdmin:
+		fe.add("realm", "required")
 	case len(p.Realms) == 1:
 		v.realm = p.Realms[0]
 	default:
@@ -116,6 +118,9 @@ func parseSubmission(p *auth.Principal, req *submissionRequest) (*validSubmissio
 	return v, nil
 }
 
+// postSubmission registers entries for a client, in its realms; with an
+// admin key (POST /v1/admin/submissions) it registers them in any existing
+// realm. Either way every group goes through the realm's rules and routing.
 func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.Principal) error {
 	var req submissionRequest
 	if err := decodeJSON(r, &req); err != nil {
@@ -146,6 +151,15 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 			held    []rules.Held
 		)
 		realmOK := p.HasRealm(sub.realm)
+		if p.Kind == auth.KindAdmin {
+			if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM realms WHERE name = $1)`,
+				sub.realm).Scan(&realmOK); err != nil {
+				return err
+			}
+			if !realmOK {
+				return invalid("realm", "no such realm")
+			}
+		}
 		if realmOK && sub.prefixErr == nil {
 			var err error
 			if rs, err = db.LoadRules(ctx, tx, sub.realm); err != nil {
@@ -203,7 +217,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 				              revision = EXCLUDED.revision, client_id = EXCLUDED.client_id,
 				              key_id = EXCLUDED.key_id, updated_at = now()
 				RETURNING `+db.EntryCols+`, (e.xmax <> 0)`,
-				submissionID, sub.realm, sub.user, g, sub.prefix, ttlSecs, rev, p.ClientID, p.KeyID)
+				submissionID, sub.realm, sub.user, g, sub.prefix, ttlSecs, rev, clientIDPtr(p), p.KeyID)
 			var wr written
 			e := &wr.entry
 			if err := row.Scan(&e.ID, &e.SubmissionID, &e.Realm, &e.User, &e.Group, &e.Prefix, &e.ExpiresAt,
@@ -216,7 +230,7 @@ func (s *Server) postSubmission(w http.ResponseWriter, r *http.Request, p *auth.
 				action = "entry.replace"
 			}
 			if err := db.InsertAudit(ctx, tx, db.Audit{
-				Actor: p.Actor, ClientID: &p.ClientID, Action: action, ObjectType: "entry", ObjectID: e.ID,
+				Actor: p.Actor, ClientID: clientIDPtr(p), Action: action, ObjectType: "entry", ObjectID: e.ID,
 				Realm: &e.Realm, User: &e.User, Group: &e.Group, Prefix: &e.Prefix,
 				Details: map[string]any{"submission_id": submissionID, "revision": rev,
 					"ttl": sub.ttl.String(), "expires_at": tsPtr(e.ExpiresAt), "key_id": p.KeyID},

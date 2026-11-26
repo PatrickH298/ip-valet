@@ -334,10 +334,29 @@ func TestEntries(t *testing.T) {
 	}
 	d.get("/entries?prefix=not-a-prefix").must(t, 200, "The prefix filter")
 	d.get("/entries/"+id).must(t, 200, "8.8.1.1/32 for carol", "Delete this entry")
-	p := d.post("/entries/"+id+"/delete", nil).must(t, 200, "Delete 8.8.1.1/32 for carol?")
-	d.confirm(p).must(t, 200, "Entry deleted.", "removing")
+
+	// Deleting from the list returns to the list as filtered.
+	other := items(admin(t, 200, "GET", "/v1/admin/entries?realm="+s.Realm+"&user=dave", nil))[0]["id"].(string)
+	list := "/entries?realm=" + s.Realm + "&user=dave"
+	d.get(list).must(t, 200, `action="/entries/`+other+`/delete"`)
+	p := d.post("/entries/"+other+"/delete", url.Values{"back": {list}}).
+		must(t, 200, "Delete 8.8.1.2/32 for dave?", "In realm "+s.Realm+", group g.")
+	p = d.confirm(p).must(t, 200, "Deleted 8.8.1.2/32 for dave.")
+	if p.URL.RequestURI() != list {
+		t.Fatalf("after deleting from the list: %s", p.URL)
+	}
+	if e := admin(t, 200, "GET", "/v1/admin/entries/"+other, nil); e["deleted_at"] == nil {
+		t.Fatal("not deleted")
+	}
+	// The way back stays on this site.
+	p = d.post("/entries/"+id+"/delete", url.Values{"back": {"https://evil.example/"}})
+	if !strings.Contains(p.Body, `href="/entries/`+id+`"`) {
+		t.Fatal("an off-site back link was used")
+	}
+	p = d.post("/entries/"+id+"/delete", nil).must(t, 200, "Delete 8.8.1.1/32 for carol?")
+	d.confirm(p).must(t, 200, "Deleted 8.8.1.1/32 for carol.", "removing")
 	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=entry.delete&realm="+s.Realm, nil))
-	if len(audit) != 1 || audit[0]["on_behalf_of"] != "alice" {
+	if len(audit) != 2 || audit[0]["on_behalf_of"] != "alice" || audit[1]["on_behalf_of"] != "alice" {
 		t.Fatalf("audit %v", audit)
 	}
 }
@@ -491,4 +510,35 @@ func TestSwitchToBasic(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("basic auth: %d", resp.StatusCode)
 	}
+}
+
+// TestAddEntry: an admin adds an entry for any user and groups, through the
+// realm's rules, and sees why a refused one was refused.
+func TestAddEntry(t *testing.T) {
+	t.Parallel()
+	s := newSetup(t)
+	d := newDash(t, nil)
+	d.signIn("alice", alicePW)
+	d.get("/entries/new?realm="+s.Realm).must(t, 200, "Add entry", `<option value="`+s.Realm+`" selected>`)
+	p := d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1\r\ng2\r\n"},
+		"prefix": {"8.8.3.3"}, "ttl": {"1d"}}).must(t, 200, "Added 8.8.3.3/32 for dana in 2 groups.", "8.8.3.3/32")
+	if p.URL.Path != "/entries" || p.URL.Query().Get("user") != "dana" {
+		t.Fatalf("after adding: %s", p.URL)
+	}
+	entries := items(admin(t, 200, "GET", "/v1/admin/entries?realm="+s.Realm+"&user=dana", nil))
+	if len(entries) != 2 || entries[0]["client_id"] != nil {
+		t.Fatalf("entries %v", entries)
+	}
+	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=entry.create&realm="+s.Realm, nil))
+	if len(audit) != 2 || audit[0]["on_behalf_of"] != "alice" || audit[0]["actor"] != d.KeyID {
+		t.Fatalf("audit %v", audit)
+	}
+	d.get("/entries/"+entries[0]["id"].(string)).must(t, 200, "Added by", "an admin, key dashboard")
+	// The realm's rules apply, and the page says which group failed and why.
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"10.0.0.1"},
+		"ttl": {"1d"}}).must(t, 422, "Nothing was added", "refused", "an IP rule denies this address")
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"8.8.3.4"},
+		"ttl": {"31d"}}).must(t, 422, "longer than the 30d the TTL rules allow")
+	d.post("/entries", url.Values{"realm": {s.Realm}, "user": {"dana"}, "groups": {"g1"}, "prefix": {"8.8.3.4"},
+		"ttl": {"forever"}}).must(t, 400, "Check the fields marked below")
 }

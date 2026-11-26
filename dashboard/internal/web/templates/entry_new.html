@@ -1,0 +1,32 @@
+{{define "content"}}{{with .Data}}
+<p class="crumbs"><a href="/entries">Entries</a> /</p>
+<h1>Add entry</h1>
+<p class="muted">Registers an address for a user, as a client would, in any realm. It goes through the realm's rules and routing, so it obeys the same limits as any other entry. Submitting an address the user already has in a group renews it with the new TTL.</p>
+{{if .Realms}}
+<form method="post" action="/entries" class="stack">
+  {{template "formerror" .Form}}
+  {{with .Results}}
+  <table>
+    <thead><tr><th>Group</th><th>Result</th></tr></thead>
+    <tbody>
+    {{- range .}}
+    <tr><td>{{.Group}}</td><td>{{if .OK}}<span class="badge ok">passes</span>{{else}}<span class="badge bad">refused</span> {{.Reason}}{{end}}</td></tr>
+    {{- end}}
+    </tbody>
+  </table>
+  {{end}}
+  <div class="row">
+    <label>Realm <select name="realm" required>
+      {{- range .Realms}}<option value="{{.Name}}"{{if eq ($.Data.Form.Get "realm") .Name}} selected{{end}}>{{.Name}}</option>{{end}}
+    </select>{{template "err" (.Form.Err "realm")}}</label>
+    <label>User <input name="user" value="{{.Form.Get "user"}}" required maxlength="256">{{template "err" (.Form.Err "user")}}</label>
+  </div>
+  <label>Groups <textarea name="groups" rows="3" cols="30" required>{{.Form.Get "groups"}}</textarea> <small>one per line; one entry per group</small>{{template "err" (.Form.Err "groups")}}</label>
+  <div class="row">
+    <label>Address or prefix <input name="prefix" value="{{.Form.Get "prefix"}}" required placeholder="203.0.113.7 or 2001:db8:1::/64" size="28">{{template "err" (.Form.Err "prefix")}}</label>
+    <label>TTL <input name="ttl" value="{{.Form.Get "ttl"}}" required size="10"> <small>for example 3600s, 90m, 36h, 30d or unlimited</small>{{template "err" (.Form.Err "ttl")}}</label>
+  </div>
+  <div class="buttons"><button>Add entry</button> <a href="/entries">Cancel</a></div>
+</form>
+{{else}}<p class="muted">Create a <a href="/realms">realm</a> first.</p>{{end}}
+{{end}}{{end}}

@@ -129,7 +129,7 @@ list of addresses and prefixes.
 | Workers | Workers with health; per worker, its details, subscriptions, rejections and keys | Create, edit and delete workers; add and delete subscriptions; create and revoke worker keys |
 | Clients | Clients and their realms; per client, its keys | Create, edit and delete clients; create and revoke client keys |
 | Keys | Every key, filterable by kind | Create admin keys; revoke any key |
-| Entries | Entries across realms, filterable by realm, user, group, prefix, state, client and worker, optionally including ended ones; per entry, its state on each worker | Delete an entry |
+| Entries | Entries across realms, filterable by realm, user, group, prefix, state, client and worker, optionally including ended ones; per entry, its state on each worker and who added it | Add an entry for any realm, user and groups (through the realm's rules, with each refused group's reason); delete any entry, from the list or its page |
 | Audit | The audit log, filterable by time, actor, person, realm and action | |
 | Account | The login | Change the user name, password and sign-in method |
 
