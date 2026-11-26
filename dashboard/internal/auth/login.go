@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,7 +73,7 @@ func OpenStore(dir string) (*Store, error) {
 	}
 	probe, err := os.CreateTemp(dir, ".write-check-*")
 	if err != nil {
-		return nil, fmt.Errorf("%s is not writable: %w", dir, err)
+		return nil, fmt.Errorf("%s is not writable: %w%s", dir, err, ownerHint(err))
 	}
 	probe.Close()
 	_ = os.Remove(probe.Name())
@@ -89,7 +90,7 @@ func OpenStore(dir string) (*Store, error) {
 		s.isDefault = true
 		return s, nil
 	case err != nil:
-		return nil, err
+		return nil, fmt.Errorf("%w%s", err, ownerHint(err))
 	}
 	var l Login
 	if err := json.Unmarshal(b, &l); err != nil {
@@ -100,6 +101,16 @@ func OpenStore(dir string) (*Store, error) {
 	}
 	s.login = l
 	return s, nil
+}
+
+// ownerHint explains a permission error: the data directory and the login
+// must belong to the user the dashboard runs as.
+func ownerHint(err error) string {
+	if !errors.Is(err, fs.ErrPermission) {
+		return ""
+	}
+	return fmt.Sprintf(" (the dashboard runs as uid %d, gid %d; give that user the data directory and its files, "+
+		"or run the dashboard as their owner)", os.Getuid(), os.Getgid())
 }
 
 func (l Login) valid() error {

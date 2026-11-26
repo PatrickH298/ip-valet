@@ -19,13 +19,18 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/PatrickH298/ip-valet/dashboard/internal/app.Commit=${COMMIT} \
         -X github.com/PatrickH298/ip-valet/dashboard/internal/app.Date=${DATE}" \
       -o /out/ipvalet-dashboard ./cmd/ipvalet-dashboard \
- && mkdir -p /out/data
+ && mkdir -p /out/root/data && chmod 0777 /out/root/data
 
 # Static, non-root, no shell. The only writable path is /data, which holds
-# the login; a new volume there takes its owner from the image.
+# the login. It runs as uid 65532 unless started as another user (docker run
+# --user, Compose user:). /data is writable by any user, so that a new named
+# volume, which copies its owner and mode from the image, works for whichever
+# one the container runs as; the files in it are private to their owner.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ipvalet-dashboard /usr/local/bin/ipvalet-dashboard
-COPY --from=build --chown=65532:65532 /out/data /data
+# data is copied as an entry of its parent, which keeps its mode on every
+# BuildKit version; some ignore COPY --chmod on the directory a COPY creates.
+COPY --from=build --chown=65532:65532 /out/root/ /
 USER nonroot:nonroot
 VOLUME ["/data"]
 EXPOSE 8090

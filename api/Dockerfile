@@ -20,7 +20,8 @@ RUN CGO_ENABLED=0 go build -trimpath \
         -X github.com/PatrickH298/ip-valet/api/internal/app.Date=${DATE}" \
       -o /out/ipvalet-api ./cmd/ipvalet-api
 
-# Static, non-root, no shell; the server needs no writable filesystem.
+# Static, non-root, no shell; the server needs no writable filesystem. It runs
+# as uid 65532 unless started as another user (docker run --user, Compose user:).
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ipvalet-api /usr/local/bin/ipvalet-api
 USER nonroot:nonroot

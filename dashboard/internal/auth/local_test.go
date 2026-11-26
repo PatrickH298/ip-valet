@@ -2,7 +2,9 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -75,6 +78,19 @@ func TestStoreDefaultAndSave(t *testing.T) {
 	}
 	if _, err := OpenStore(filepath.Join(dir, "missing")); err == nil {
 		t.Fatal("missing directory accepted")
+	}
+}
+
+// A permission error names the user the dashboard runs as; tests run as root,
+// which no file mode stops, so the hint is checked directly.
+func TestOwnerHint(t *testing.T) {
+	if h := ownerHint(os.ErrNotExist); h != "" {
+		t.Fatalf("hint for a missing file: %q", h)
+	}
+	err := &fs.PathError{Op: "open", Path: "/data/login.json", Err: syscall.EACCES}
+	want := fmt.Sprintf("uid %d, gid %d", os.Getuid(), os.Getgid())
+	if h := ownerHint(err); !strings.Contains(h, want) {
+		t.Fatalf("hint %q lacks %q", h, want)
 	}
 }
 
