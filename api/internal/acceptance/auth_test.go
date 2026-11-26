@@ -289,9 +289,9 @@ func TestFailedAuthenticationThrottle(t *testing.T) {
 		}
 	}
 
-	// Without a trusted proxy, X-Forwarded-For is ignored: every request here
-	// comes from 127.0.0.1, whatever the header says.
-	h2 := testutil.New(t, map[string]string{"IPVALET_AUTH_FAILURES_PER_MINUTE": "3"})
+	// With IPVALET_TRUSTED_PROXIES=none, X-Forwarded-For is ignored: every
+	// request here comes from 127.0.0.1, whatever the header says.
+	h2 := testutil.New(t, map[string]string{"IPVALET_AUTH_FAILURES_PER_MINUTE": "3", "IPVALET_TRUSTED_PROXIES": "none"})
 	s2 := h2.Basic("r")
 	for i, ip := range []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"} {
 		if r := h2.Do("GET", "/v1/entries", bad.String(), nil, "X-Forwarded-For", ip); r.Status != 401 {
@@ -300,5 +300,18 @@ func TestFailedAuthenticationThrottle(t *testing.T) {
 	}
 	if r := h2.Do("GET", "/v1/entries", s2.ClientKey, nil, "X-Forwarded-For", "192.0.2.4"); r.Status != 429 {
 		t.Fatalf("an untrusted X-Forwarded-For escaped the throttle: %d", r.Status)
+	}
+
+	// By default every peer is trusted, so the header names the client.
+	h3 := testutil.New(t, map[string]string{"IPVALET_AUTH_FAILURES_PER_MINUTE": "3"})
+	s3 := h3.Basic("r")
+	for _, ip := range []string{"192.0.2.1", "192.0.2.1", "192.0.2.1"} {
+		h3.Do("GET", "/v1/entries", bad.String(), nil, "X-Forwarded-For", ip)
+	}
+	if r := h3.Do("GET", "/v1/entries", s3.ClientKey, nil, "X-Forwarded-For", "192.0.2.1"); r.Status != 429 {
+		t.Fatalf("the throttled forwarded address: %d", r.Status)
+	}
+	if r := h3.Do("GET", "/v1/entries", s3.ClientKey, nil, "X-Forwarded-For", "192.0.2.2"); r.Status != 200 {
+		t.Fatalf("another forwarded address: %d", r.Status)
 	}
 }

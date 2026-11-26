@@ -57,20 +57,20 @@ That is the whole of the enforcement: a client acts only inside its realms, ever
 **Admin bootstrap.** Two ways to get the first admin key; both can be used together.
 
 1. `create-admin-key`, run inside the API container, stores a hashed key in the database and prints it once. These keys can be listed and revoked through the API.
-2. A key supplied at startup through `IPVALET_ADMIN_KEY`, `IPVALET_ADMIN_KEY_FILE` (a mounted secret; preferred, since environment variables are visible to `inspect` and `/proc`) or `IPVALET_ADMIN_KEY_HASH` (only the hash, so the host never holds the key). It is held in memory only, cannot be revoked through the API, and is rotated by changing the secret and restarting. Its audit actor is `admin:env`.
+2. A key supplied at startup through `IPVALET_ADMIN_KEY`, `IPVALET_ADMIN_KEY_FILE` (the same, read from a file such as a Docker secret) or `IPVALET_ADMIN_KEY_HASH` (only the hash, so the host never holds the key). It is held in memory only, cannot be revoked through the API, and is rotated by changing the setting and restarting. Its audit actor is `admin:env`.
 
 **Key format and handling**
 
 - Format `ipv_<keyid>_<secret>`, with 256 bits of randomness in the secret.
 - Only a SHA-256 hash of the secret is stored; the key is looked up by its id and compared in constant time.
-- Sent as `Authorization: Bearer <key>`, over TLS only (terminated by the reverse proxy).
+- Sent as `Authorization: Bearer <key>`. The server speaks plain HTTP; TLS, where wanted, comes from a reverse proxy in front.
 - Several active keys per client or worker, so rotation can overlap; optional expiry per key; revocation takes effect on the key's next request, and an open event stream ends within one heartbeat (20 s); `last_used_at` is recorded.
 - **Brute-force protection.** Guessing a 256-bit secret is not feasible at any rate, so the protection is aimed at floods and scanning. A network (an IPv4 address, or an IPv6 /64, since one host can use a whole /64) that fails authentication 10 times in a minute has its requests refused unchecked, with 429 and `Retry-After`, until its budget refills; a refused request costs no database work. Successful requests never count, and a valid key used on the wrong route is not a failure. Failures are logged (a wrong secret for a real key id at warning level) and counted in metrics by reason.
-- **The caller's address.** Behind the reverse proxy every connection comes from the proxy, so the server reads `X-Forwarded-For` only when the connection comes from a configured trusted proxy, taking the rightmost address that is not a trusted proxy. A client cannot pick its address by sending the header itself.
+- **The caller's address.** The server reads `X-Forwarded-For` when the connection comes from a trusted proxy, taking the rightmost address that is not a trusted proxy. By default every peer is trusted, so a client can name its own address; setting `IPVALET_TRUSTED_PROXIES` to a proxy's address (or `none`) stops that.
 - **Event streams.** Each key may hold a few open event streams per API instance (4 by default), so a leaked key cannot multiply the work every change causes.
 - **No caching.** Responses under `/v1` carry `Cache-Control: no-store`, since they can hold new keys and address lists.
 - **Bad keys cost nothing.** Each instance keeps every key's id and secret hash in memory (they never change), so an unknown key or a wrong secret is refused without touching the database. Whether a key is revoked or expired is still read from the database on every request.
-- **Admin API on its own listener.** The admin API is served on a separate port (8081 by default) that the reverse proxy never exposes; the public port answers `/v1/admin/*` with 404. An admin key, which controls everything, is then useless from the internet even if it leaks.
+- **Admin API on its own listener.** The admin API is served on a separate port (8081 by default); the main port answers `/v1/admin/*` with 404. A deployer can therefore make the admin API reachable from fewer places than the client and worker API.
 - **Key hygiene.** Admin keys should expire; creating one without an expiry returns a warning. The admin health view lists keys about to expire (an unattended worker would stop) and keys unused for 30 days (likely forgotten). Audit rows record the caller's address.
 - There are no rate limits on authenticated requests for now.
 
@@ -311,7 +311,7 @@ A client sees, replaces and deletes everything in its realms, including entries 
 
 ## Operations
 
-The API server is written in Go: `net/http` (method-and-path routing, SSE), `net/netip` for prefix containment and overlap, and `pgx` for Postgres including `LISTEN`/`NOTIFY`. It ships as a static binary in a minimal image, behind a TLS-terminating reverse proxy.
+The API server is written in Go: `net/http` (method-and-path routing, SSE), `net/netip` for prefix containment and overlap, and `pgx` for Postgres including `LISTEN`/`NOTIFY`. It ships as a static binary in a minimal image and serves plain HTTP, with or without a reverse proxy in front.
 
 | Area | Decision |
 | --- | --- |
@@ -319,10 +319,10 @@ The API server is written in Go: `net/http` (method-and-path routing, SSE), `net
 | Migrations | Versioned SQL files (goose) run at startup inside a transaction, under a Postgres advisory lock so two instances cannot run them at once. |
 | Retention | Expired and removed entries are purged after 90 days, the audit log after 1 year; both configurable. The purge job takes an advisory lock. |
 | Health | `/healthz` reports the process is up; `/readyz` that the database is reachable (checked at most once a second) and the `LISTEN` connection is up. |
-| Deployment | `deploy/compose.example.yaml`: the API with a read-only filesystem, no capabilities and `no-new-privileges`; Postgres on an internal network with a non-superuser role for the API; the admin port bound to the host or a trusted network. |
+| Deployment | `deploy/compose.example.yaml`: Postgres, the API and the dashboard on one network, configured by environment variables (secrets optional), the API and dashboard with a read-only filesystem, no capabilities and `no-new-privileges`. The API creates its database on first start. |
 | Dependencies | Weekly update pull requests (Dependabot for now, Renovate later); govulncheck in every CI run, including the weekly one. |
 | Metrics | Prometheus, on a separate port: submissions by result code, per-worker `last_seen_at`, per-worker revision lag (current revision minus `applied_revision`), connected workers. External monitoring alerts when a worker falls behind or goes quiet. |
-| Configuration | Environment variables only, with built-in defaults (for example `IPVALET_DEFAULT_TTL=30d`); secrets also accept `_FILE` variants. |
+| Configuration | Environment variables only, with built-in defaults (for example `IPVALET_DEFAULT_TTL=30d`); secrets also accept `_FILE` variants, so Docker secrets work but are never required. |
 | Existing data | Start empty; no import from `unifi-ip-valet`. |
 
 **Ready for a second instance.** One API instance runs today. To keep a second one possible:
@@ -354,7 +354,7 @@ ip-valet/
 │   └── unifi/                 # language chosen per worker
 ├── clients/
 │   └── web/                   # language chosen per client
-├── deploy/                    # compose example, Postgres init script, setup notes
+├── deploy/                    # compose example and setup notes
 └── .github/workflows/
 ```
 
@@ -375,7 +375,7 @@ Questions that were open in the first draft, and how they were settled.
 | Admin dashboard | A separate component that holds one admin key and calls the admin API server-side; it has one login, admin / admin until changed on its Account page, with form or basic sign-in (OpenID Connect later), and the audit log records each change with the login's name. See [dashboard.md](dashboard.md). |
 | A submitted prefix with host bits set (`203.0.113.7/24`) | Normalised to `203.0.113.0/24`; the canonical form is returned. |
 | `DEFAULT_TTL` for seeded TTL rules | Set per deployment by environment variable (`IPVALET_DEFAULT_TTL`), default 30 days; used only when a realm is created. |
-| Admin API exposure | On its own listener, never behind the public proxy. |
+| Admin API exposure | On its own listener, so it can be exposed separately; where each listener is reachable is the deployer's choice. |
 | Rate limits | None for now. Failed authentication is throttled per network instead (see Trust model and authentication). |
 | Per-client user and group allow-lists | Removed. A client's scope is its realms; the realms' rules bound what it can register. |
 | Existing entries that a rule change makes invalid | Always enforced on confirmation: removed or shortened. Caps keep the most recently submitted prefixes. |

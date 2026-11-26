@@ -15,19 +15,18 @@ info:
     malformed, unknown, revoked or expired key is `401 unauthenticated`; a key
     of the wrong kind is `403 forbidden`.
 
-    **Listeners.** The client and worker APIs are served on the public
-    listener (port 8080 by default), which the reverse proxy exposes. The
-    admin API (`/v1/admin/*`) is served on a separate admin listener (port
-    8081 by default) that should be reachable only from a trusted network;
-    the public listener answers `/v1/admin/*` with 404. Both serve
-    `/healthz` and `/readyz`.
+    **Listeners.** The client and worker APIs are served on the main
+    listener (port 8080 by default). The admin API (`/v1/admin/*`) is served
+    on a separate admin listener (port 8081 by default), and the main
+    listener answers `/v1/admin/*` with 404. Both serve `/healthz` and
+    `/readyz`.
 
     **Failed authentication.** A network (an IPv4 address, or an IPv6 /64)
     that fails authentication too often, by default 10 times a minute, has
     its requests refused unchecked with 429 `too_many_attempts` and
     `Retry-After` until its budget refills. Successful requests never count.
-    Behind a reverse proxy the server reads the caller's address from
-    `X-Forwarded-For` only when the proxy is configured as trusted.
+    The caller's address is read from `X-Forwarded-For` when the peer is a
+    trusted proxy; by default every peer is trusted.
 
     **Workers.** An admin registers each worker with a name, a label (the
     only worker field clients see), the address families it applies and its
@@ -87,7 +86,7 @@ info:
     identifier: AGPL-3.0-only
 servers:
   - url: https://ip-valet.example.com
-    description: Behind a TLS-terminating reverse proxy.
+    description: Plain HTTP on port 8080, or HTTPS through a reverse proxy.
 tags:
   - name: client
     description: Submit and manage entries; read their applied state. Client keys.

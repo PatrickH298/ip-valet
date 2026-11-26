@@ -30,6 +30,11 @@ func TestSignInAndOut(t *testing.T) {
 	if p.URL.RequestURI() != "/realms?x=1" {
 		t.Fatalf("after sign-in: %s", p.URL)
 	}
+	// Plain HTTP: a plain cookie, which the browser keeps.
+	u, _ := url.Parse(d.URL)
+	if cs := d.c.Jar.Cookies(u); len(cs) != 1 || cs[0].Name != "ipvalet-session" {
+		t.Fatalf("cookies over plain HTTP: %v", cs)
+	}
 	// Signed in, the sign-in page moves on.
 	if p := d.get("/login"); p.URL.Path != "/" {
 		t.Fatalf("/login when signed in: %s", p.URL)
@@ -75,6 +80,8 @@ func TestBasicAuth(t *testing.T) {
 	}
 }
 
+// TestSecureCookie: in the default (auto) mode, sign-in over TLS sets a
+// Secure __Host- cookie.
 func TestSecureCookie(t *testing.T) {
 	t.Parallel()
 	if env.skip != "" {
@@ -82,7 +89,6 @@ func TestSecureCookie(t *testing.T) {
 	}
 	key := admin(t, 201, "POST", "/v1/admin/keys", map[string]any{"kind": "admin", "name": "tls"})["key"].(string)
 	cfg := testConfig(t, key)
-	cfg.SecureCookies = true
 	dd, err := app.Start(context.Background(), cfg, logger())
 	if err != nil {
 		t.Fatal(err)

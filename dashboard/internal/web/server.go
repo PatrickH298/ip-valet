@@ -28,8 +28,8 @@ type Options struct {
 	Log            *slog.Logger
 	Location       *time.Location
 	TrustedProxies []netip.Prefix
-	SecureCookies  bool   // mark the flash cookie Secure
-	SelfKeyID      string // the id of the dashboard's own admin key
+	Cookies        auth.CookieMode // when the flash cookie is Secure
+	SelfKeyID      string          // the id of the dashboard's own admin key
 	Version        string
 }
 
@@ -132,7 +132,8 @@ func (s *Server) wrap(next http.Handler) http.Handler {
 		start := time.Now()
 		ip := auth.ClientIP(r, s.TrustedProxies)
 		info := &reqInfo{}
-		r = r.WithContext(context.WithValue(auth.WithClientIP(r.Context(), ip), infoKey{}, info))
+		ctx := auth.WithHTTPS(auth.WithClientIP(r.Context(), ip), auth.RequestIsHTTPS(r, s.TrustedProxies))
+		r = r.WithContext(context.WithValue(ctx, infoKey{}, info))
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'self'; img-src 'self'; "+
 			"form-action 'self'; frame-ancestors 'none'; base-uri 'none'")

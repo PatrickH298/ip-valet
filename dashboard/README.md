@@ -60,8 +60,9 @@ other sites are refused. External sign-in with OpenID Connect is planned.
 
 ## Environment variables
 
-A variable marked *secret* also accepts a `_FILE` variant naming a file that
-holds the value. An invalid value stops the dashboard at startup, and the error
+Only `IPVALET_DASHBOARD_API_URL` and `IPVALET_DASHBOARD_API_KEY` are required. A
+variable marked *secret* also accepts a `_FILE` variant naming a file that holds
+the value, such as a Docker secret. An invalid value stops the dashboard at startup, and the error
 names the variable.
 
 | Variable | Default | Meaning |
@@ -69,19 +70,19 @@ names the variable.
 | `IPVALET_DASHBOARD_API_URL` | required | The API server's admin listener, for example `http://api:8081` |
 | `IPVALET_DASHBOARD_API_KEY` *(secret)* | required | The admin key the dashboard uses; give it its own, with an expiry |
 | `IPVALET_DASHBOARD_DATA_DIR` | `/data` | Writable directory for the login (`login.json`); keep it on a persistent volume |
-| `IPVALET_DASHBOARD_LISTEN_ADDR` | `:8090` | Listen address (plain HTTP, behind a proxy that terminates TLS) |
-| `IPVALET_DASHBOARD_SECURE_COOKIES` | `true` | Mark cookies `Secure` (with the `__Host-` prefix). Needs HTTPS or `http://localhost`; `false` logs a warning |
+| `IPVALET_DASHBOARD_LISTEN_ADDR` | `:8090` | Address the dashboard listens on (plain HTTP) |
+| `IPVALET_DASHBOARD_SECURE_COOKIES` | `auto` | When cookies are marked `Secure` (a session cookie then takes the `__Host-` prefix): `auto` (when the browser came over HTTPS, directly or as `X-Forwarded-Proto` from a trusted proxy says), `true` (always; browsers then keep them only over HTTPS and on `http://localhost`) or `false` (never) |
 | `IPVALET_DASHBOARD_SESSION_IDLE` | `30m` | Idle time that ends a session |
 | `IPVALET_DASHBOARD_SESSION_MAX` | `12h` | Longest a session lasts |
 | `IPVALET_DASHBOARD_LOGIN_FAILURES_PER_MINUTE` | `10` | Failed sign-ins allowed per IPv4 address or IPv6 /64 per minute; `0` = off |
-| `IPVALET_DASHBOARD_TRUSTED_PROXIES` | unset | Comma-separated IPs or CIDRs of your reverse proxies; only their `X-Forwarded-For` is believed |
+| `IPVALET_DASHBOARD_TRUSTED_PROXIES` | `*` | Peers whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed: `*` (every peer), `none`, or comma-separated IPs and CIDR prefixes |
 | `IPVALET_DASHBOARD_API_TIMEOUT` | `10s` | Timeout for each API call |
 | `IPVALET_DASHBOARD_TIMEZONE` | `UTC` | IANA time zone for displayed times |
 | `IPVALET_DASHBOARD_SHUTDOWN_TIMEOUT` | `15s` | Grace period for in-flight requests on shutdown |
 | `IPVALET_DASHBOARD_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
 At startup the dashboard calls the API. A refused key, or a URL that points at
-the public listener instead of the admin one, stops it. An API server that is
+the main listener instead of the admin one, stops it. An API server that is
 not up yet is only a warning; pages say so until it answers.
 
 `GET /healthz` returns 200 `ok` without signing in. Logs are JSON on stdout:

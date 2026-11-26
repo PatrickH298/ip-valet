@@ -28,7 +28,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.DBMaxConns != 10 || c.ListenAddr != ":8080" || c.MetricsAddr != ":9090" || c.DefaultTTL != 30*24*time.Hour ||
-		c.DefaultPrefixV4 != 32 || c.DefaultPrefixV6 != 64 || c.AuthFailuresPerMinute != 10 || c.AdminListenAddr != ":8081" || c.AdminKeySource != "" || c.MaxStreamsPerKey != 4 || c.TrustedProxies != nil ||
+		c.DefaultPrefixV4 != 32 || c.DefaultPrefixV6 != 64 || c.AuthFailuresPerMinute != 10 || c.AdminListenAddr != ":8081" || c.AdminKeySource != "" || c.MaxStreamsPerKey != 4 || len(c.TrustedProxies) != 2 ||
 		c.RetentionEntries != 90*24*time.Hour || c.RetentionAudit != 365*24*time.Hour || c.PurgeInterval != time.Hour ||
 		c.SSEHeartbeat != 20*time.Second || c.ClientEventsRecheck != 30*time.Second || c.MaxBodyBytes != 65536 ||
 		c.ShutdownTimeout != 15*time.Second || c.AdminKeyID != "" {
@@ -117,6 +117,20 @@ func TestTrustedProxies(t *testing.T) {
 	}
 	if strings.Join(got, " ") != "10.0.0.5/32 172.16.0.0/12 fd00::/8 192.0.2.1/32" {
 		t.Fatalf("trusted proxies = %v", got)
+	}
+	for in, want := range map[string]string{"": "0.0.0.0/0 ::/0", "*": "0.0.0.0/0 ::/0", "none": "", "NONE": ""} {
+		vars := map[string]string{"IPVALET_DATABASE_URL": "x"}
+		if in != "" {
+			vars["IPVALET_TRUSTED_PROXIES"] = in
+		}
+		c, err := Load(env(vars), files(nil))
+		var got []string
+		for _, p := range c.TrustedProxies {
+			got = append(got, p.String())
+		}
+		if err != nil || strings.Join(got, " ") != want {
+			t.Errorf("IPVALET_TRUSTED_PROXIES=%q: %v %v, want %q", in, got, err, want)
+		}
 	}
 	if _, err := Load(env(map[string]string{"IPVALET_DATABASE_URL": "x", "IPVALET_TRUSTED_PROXIES": "proxy.local"}), files(nil)); err == nil ||
 		!strings.Contains(err.Error(), "IPVALET_TRUSTED_PROXIES") {

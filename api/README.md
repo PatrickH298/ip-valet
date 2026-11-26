@@ -7,9 +7,10 @@ clients build against is [`spec/openapi.yaml`](../spec/openapi.yaml). The
 [implementation spec](../docs/api-server-spec.md) describes this server in
 detail.
 
-It listens for plain HTTP and is meant to sit behind a reverse proxy that
-terminates TLS. All configuration comes from environment variables. The server
-reads no config file.
+It serves plain HTTP; for TLS, put a reverse proxy in front of it. All
+configuration comes from environment variables, and the server reads no config
+file. It creates its database on first start if the database does not exist
+and its role may create databases, then runs its migrations.
 
 ## Commands
 
@@ -40,9 +41,10 @@ You can get the first admin key in either of two ways, and you can use both:
 
    The key is stored hashed. It can be listed and revoked through the API.
 
-2. Supply a key at startup with `IPVALET_ADMIN_KEY_FILE` (a mounted secret,
-   preferred), `IPVALET_ADMIN_KEY` or `IPVALET_ADMIN_KEY_HASH`. Any random key
-   in the `ipv_<16 base32>_<52 base32>` format works, for example:
+2. Supply a key at startup with `IPVALET_ADMIN_KEY`, `IPVALET_ADMIN_KEY_FILE`
+   (the same, read from a file such as a Docker secret) or
+   `IPVALET_ADMIN_KEY_HASH`. Any random key in the
+   `ipv_<16 base32>_<52 base32>` format works, for example:
 
    ```bash
    KEY=$(printf 'ipv_%s_%s\n' \
@@ -57,13 +59,13 @@ You can get the first admin key in either of two ways, and you can use both:
    ```
 
    This key is held in memory only. It cannot be listed or revoked through
-   the API; to rotate it, change the secret and restart. Its audit actor is
+   the API; to rotate it, change the variable and restart. Its audit actor is
    `admin:env`.
 
 ## Environment variables
 
-Every variable has a built-in default. A variable marked *secret* also accepts
-a `_FILE` variant (for example `IPVALET_DATABASE_URL_FILE`) naming a file whose
+Every variable except `IPVALET_DATABASE_URL` has a built-in default. A variable
+marked *secret* also accepts a `_FILE` variant (for example `IPVALET_DATABASE_URL_FILE`) naming a file whose
 contents are the value, with one trailing newline trimmed. Setting both a
 variable and its `_FILE` variant is a startup error. An invalid value stops the
 server at startup, and the error message names the variable.
@@ -73,10 +75,10 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `IPVALET_DATABASE_URL` *(secret)* | required | Postgres connection string (Postgres 16 or newer) |
+| `IPVALET_DATABASE_URL` *(secret)* | required | Postgres connection string (Postgres 16 or newer). A database that does not exist is created, if the role may create databases |
 | `IPVALET_DB_MAX_CONNS` | `10` | Pool size; one more connection is held for `LISTEN` |
-| `IPVALET_LISTEN_ADDR` | `:8080` | Public listen address: client and worker APIs (plain HTTP, behind the proxy) |
-| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Admin API listen address; keep it off the proxy. Empty serves admin routes on the public address (with a startup warning) |
+| `IPVALET_LISTEN_ADDR` | `:8080` | Address the client and worker API listens on (plain HTTP) |
+| `IPVALET_ADMIN_LISTEN_ADDR` | `:8081` | Address the admin API (`/v1/admin/*`) listens on. Empty serves it on `IPVALET_LISTEN_ADDR` instead |
 | `IPVALET_METRICS_ADDR` | `:9090` | Address for `/metrics`; empty disables metrics |
 | `IPVALET_ADMIN_KEY` *(secret)* | unset | An admin key accepted in addition to database keys |
 | `IPVALET_ADMIN_KEY_HASH` | unset | Alternative to `IPVALET_ADMIN_KEY`: `<keyid>:<hex sha256 of secret>` from `hash-key`. Setting both is an error. |
@@ -84,7 +86,7 @@ Durations use Go syntax (`90s`, `15m`, `36h`) plus a `d` suffix for whole days
 | `IPVALET_DEFAULT_PREFIX_V4` | `32` | Shortest IPv4 prefix length in the seeded prefix rule |
 | `IPVALET_DEFAULT_PREFIX_V6` | `64` | Shortest IPv6 prefix length in the seeded prefix rule |
 | `IPVALET_AUTH_FAILURES_PER_MINUTE` | `10` | Failed authentications allowed per client network (IPv4 address or IPv6 /64) per minute; after that its requests get 429 until the budget refills. `0` = off |
-| `IPVALET_TRUSTED_PROXIES` | unset | Comma-separated IPs or CIDRs of your reverse proxies. Set it: only their `X-Forwarded-For` is believed, and without it every client behind the proxy shares one failed-authentication budget |
+| `IPVALET_TRUSTED_PROXIES` | `*` | Peers whose `X-Forwarded-For` names the client, for logs, the audit log and the failed-authentication throttle: `*` (every peer; a request can then name any address), `none` (no peer; the connection's address is the client), or comma-separated IPs and CIDR prefixes |
 | `IPVALET_MAX_STREAMS_PER_KEY` | `4` | Open event streams allowed per key, per API instance |
 | `IPVALET_RETENTION_ENTRIES` | `90d` | Purge deleted or expired entries this long after they ended |
 | `IPVALET_RETENTION_AUDIT` | `365d` | Purge audit rows older than this |
@@ -100,14 +102,13 @@ them later does not alter existing rules.
 
 ## Endpoints without authentication
 
-These are on both the public and the admin listener:
+These are served on both the main and the admin listener:
 
 - `GET /healthz` returns 200 `ok` whenever the process is serving.
 - `GET /readyz` returns 200 when `SELECT 1` succeeds within 2 s and the
   `LISTEN` connection is up. Otherwise it returns 503. The database check is
   reused for a second, so probes cost at most one query per second.
-- `GET /metrics` is served on `IPVALET_METRICS_ADDR` only, so the public
-  proxy never exposes it.
+- `GET /metrics` is served on its own listener, `IPVALET_METRICS_ADDR`.
 
 Logs are JSON on stdout: one access line per request with the method, route
 pattern, status, duration, actor, the person an admin key acted for
@@ -126,9 +127,9 @@ docker build -t ip-valet-api \
 ```
 
 The image is built from `gcr.io/distroless/static-debian12:nonroot`. It runs as
-a non-root user, needs no writable filesystem and exposes 8080 (public API),
-8081 (admin API) and 9090 (metrics). For a hardened Compose setup with
-Postgres, see [`deploy/`](../deploy/README.md).
+a non-root user, needs no writable filesystem and exposes 8080 (client and
+worker API), 8081 (admin API) and 9090 (metrics). For a Compose setup with
+Postgres and the dashboard, see [`deploy/`](../deploy/README.md).
 
 ## Development
 

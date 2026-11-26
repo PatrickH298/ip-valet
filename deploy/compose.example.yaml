@@ -1,39 +1,109 @@
-# Example deployment: the ip-valet API, its Postgres and the admin dashboard.
-# Copy it, read deploy/README.md, fill in the secrets and the proxy settings,
-# then `docker compose up -d`. Your reverse proxy (Traefik, Caddy, nginx...)
-# terminates TLS and forwards the public hostname to api:8080 only.
+# Example deployment of ip-valet: Postgres, the API server and the admin
+# dashboard. See deploy/README.md for the first start.
+#
+# Every setting is an environment variable. The required ones are set below;
+# every optional one is listed commented out, with its default and what it
+# does. A variable marked (secret) can instead be read from a file by adding
+# _FILE to its name (for example IPVALET_DATABASE_URL_FILE), such as a Docker
+# secret: each service shows the commented-out lines for that, and the
+# secrets themselves are defined, commented out, at the end of this file.
+#
+# All three services share the project's default network, so any container
+# on it reaches the API directly at http://api:8080 (client and worker API)
+# and http://api:8081 (admin API).
 
 name: ip-valet
 
 services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      # The role Postgres creates on first start (a superuser of this server).
+      POSTGRES_USER: ipvalet
+      # That role's password. Change it, here and in IPVALET_DATABASE_URL.
+      POSTGRES_PASSWORD: change-me
+      # Or read the password from a secret instead:
+      # POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    # secrets: [postgres_password]
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ipvalet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   api:
     image: ghcr.io/patrickh298/ip-valet-api:0.1.0
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
-    # Hardening: no writable filesystem, no Linux capabilities, no privilege
-    # escalation. The image already runs as a non-root user (uid 65532).
+    # Container hardening: no writable filesystem, no Linux capabilities, no
+    # privilege escalation. The image runs as a non-root user (uid 65532).
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
-      IPVALET_DATABASE_URL_FILE: /run/secrets/ipvalet_database_url
-      IPVALET_LISTEN_ADDR: ":8080" # public API: the only port the proxy should reach
-      IPVALET_ADMIN_LISTEN_ADDR: ":8081" # admin API: trusted networks only (see ports)
-      IPVALET_METRICS_ADDR: ":9090" # Prometheus: internal network only
-      # The proxy's address, or its network's subnet. Without it every client
-      # behind the proxy shares one failed-authentication budget.
-      IPVALET_TRUSTED_PROXIES: ${IPVALET_TRUSTED_PROXIES:?set to your reverse proxy's address or subnet}
-      # Optional bootstrap admin key, as a hash so this host never holds the key
-      # (see deploy/README.md). Or create one with `create-admin-key`.
-      # IPVALET_ADMIN_KEY_HASH: "<keyid>:<sha256 hex>"
-    secrets: [ipvalet_database_url]
+      # (required, secret) Postgres connection string. If the database does
+      # not exist, the API creates it, provided the role may create databases.
+      IPVALET_DATABASE_URL: postgres://ipvalet:change-me@db:5432/ipvalet?sslmode=disable
+      # IPVALET_DATABASE_URL_FILE: /run/secrets/ipvalet_database_url
+
+      # ---- Optional; the values shown are the defaults ----
+      # Size of the database connection pool; one more connection is held for LISTEN.
+      # IPVALET_DB_MAX_CONNS: "10"
+      # Address the client and worker API listens on (plain HTTP).
+      # IPVALET_LISTEN_ADDR: ":8080"
+      # Address the admin API (/v1/admin/*) listens on. Empty serves it on
+      # IPVALET_LISTEN_ADDR instead.
+      # IPVALET_ADMIN_LISTEN_ADDR: ":8081"
+      # Address Prometheus metrics (/metrics) are served on. Empty turns them off.
+      # IPVALET_METRICS_ADDR: ":9090"
+      # (secret) An admin key accepted besides the keys in the database, in the
+      # form ipv_<16 base32>_<52 base32>. Unset by default.
+      # IPVALET_ADMIN_KEY: ""
+      # IPVALET_ADMIN_KEY_FILE: /run/secrets/ipvalet_admin_key
+      # Instead of IPVALET_ADMIN_KEY: only that key's hash, <keyid>:<sha256 hex>,
+      # as printed by `ipvalet-api hash-key`. Unset by default.
+      # IPVALET_ADMIN_KEY_HASH: ""
+      # Longest TTL in the TTL rule seeded into each new realm (s, m, h or d units).
+      # IPVALET_DEFAULT_TTL: 30d
+      # Shortest IPv4 prefix length in the prefix rule seeded into each new realm.
+      # IPVALET_DEFAULT_PREFIX_V4: "32"
+      # Shortest IPv6 prefix length in the prefix rule seeded into each new realm.
+      # IPVALET_DEFAULT_PREFIX_V6: "64"
+      # Failed authentications allowed per client network (an IPv4 address or
+      # an IPv6 /64) per minute before its requests get 429; 0 turns it off.
+      # IPVALET_AUTH_FAILURES_PER_MINUTE: "10"
+      # Peers whose X-Forwarded-For header names the client: * (every peer),
+      # none (no peer; the connection's address is the client), or a
+      # comma-separated list of IP addresses and CIDR prefixes.
+      # IPVALET_TRUSTED_PROXIES: "*"
+      # Event streams one key may hold open at once, per API instance.
+      # IPVALET_MAX_STREAMS_PER_KEY: "4"
+      # How long deleted or expired entries are kept before they are purged.
+      # IPVALET_RETENTION_ENTRIES: 90d
+      # How long audit log rows are kept.
+      # IPVALET_RETENTION_AUDIT: 365d
+      # How often the purge job runs.
+      # IPVALET_PURGE_INTERVAL: 1h
+      # Interval between keep-alive comments on event streams.
+      # IPVALET_SSE_HEARTBEAT: 20s
+      # How often client event streams look again for entries that expired.
+      # IPVALET_CLIENT_EVENTS_RECHECK: 30s
+      # Largest request body accepted, in bytes.
+      # IPVALET_MAX_BODY_BYTES: "65536"
+      # How long shutdown waits for requests in flight.
+      # IPVALET_SHUTDOWN_TIMEOUT: 15s
+      # Log level: debug, info, warn or error.
+      # IPVALET_LOG_LEVEL: info
+    # secrets: [ipvalet_database_url, ipvalet_admin_key]
     ports:
-      # Admin API on this host only. To reach it from your LAN or VPN, bind
-      # to that interface's address instead; never publish it to the internet.
-      - "127.0.0.1:8081:8081"
-    networks: [proxy, internal]
+      - "8080:8080" # client and worker API
+      - "8081:8081" # admin API
+      # - "9090:9090" # Prometheus metrics
 
   dashboard:
     image: ghcr.io/patrickh298/ip-valet-dashboard:main # pin a release tag once one exists
@@ -43,62 +113,70 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
-      IPVALET_DASHBOARD_API_URL: http://api:8081 # the admin listener
-      IPVALET_DASHBOARD_API_KEY_FILE: /run/secrets/dashboard_api_key
-      # Secure cookies need HTTPS, or http://localhost (an SSH tunnel). Set
-      # false only to use plain HTTP across your LAN.
-      IPVALET_DASHBOARD_SECURE_COOKIES: "true"
-      IPVALET_DASHBOARD_TRUSTED_PROXIES: ${IPVALET_TRUSTED_PROXIES:?set to your reverse proxy's address or subnet}
-      IPVALET_DASHBOARD_TIMEZONE: UTC
-    secrets: [dashboard_api_key]
+      # (required) URL of the API server's admin listener.
+      IPVALET_DASHBOARD_API_URL: http://api:8081
+      # (required, secret) The admin key the dashboard uses for every API call.
+      # Create one with `ipvalet-api create-admin-key` (see deploy/README.md)
+      # and paste it here; the dashboard does not start without it.
+      IPVALET_DASHBOARD_API_KEY: ""
+      # IPVALET_DASHBOARD_API_KEY_FILE: /run/secrets/dashboard_api_key
+
+      # ---- Optional; the values shown are the defaults ----
+      # Address the dashboard listens on (plain HTTP).
+      # IPVALET_DASHBOARD_LISTEN_ADDR: ":8090"
+      # Timeout for each call to the API server.
+      # IPVALET_DASHBOARD_API_TIMEOUT: 10s
+      # Writable directory that holds the dashboard's login (login.json).
+      # IPVALET_DASHBOARD_DATA_DIR: /data
+      # When session cookies are marked Secure: auto (when the browser reached
+      # the dashboard over HTTPS), true (always; browsers then keep them only
+      # over HTTPS and on localhost) or false (never).
+      # IPVALET_DASHBOARD_SECURE_COOKIES: auto
+      # Idle time that ends a sign-in session.
+      # IPVALET_DASHBOARD_SESSION_IDLE: 30m
+      # Longest a sign-in session lasts.
+      # IPVALET_DASHBOARD_SESSION_MAX: 12h
+      # Failed sign-ins allowed per client network per minute; 0 turns it off.
+      # IPVALET_DASHBOARD_LOGIN_FAILURES_PER_MINUTE: "10"
+      # Peers whose X-Forwarded-For and X-Forwarded-Proto headers are believed:
+      # * (every peer), none, or a comma-separated list of IPs and CIDR prefixes.
+      # IPVALET_DASHBOARD_TRUSTED_PROXIES: "*"
+      # IANA time zone for the times pages show.
+      # IPVALET_DASHBOARD_TIMEZONE: UTC
+      # How long shutdown waits for requests in flight.
+      # IPVALET_DASHBOARD_SHUTDOWN_TIMEOUT: 15s
+      # Log level: debug, info, warn or error.
+      # IPVALET_DASHBOARD_LOG_LEVEL: info
+    # secrets: [dashboard_api_key]
     volumes:
-      # The login (first boot: admin / admin, changed on first sign-in).
-      # The rest of the filesystem stays read-only.
+      # The login (admin / admin until you change it on first sign-in).
       - dashboard-data:/data
     ports:
-      # On this host only, like the admin API. Route a hostname to
-      # dashboard:8090 in your proxy (over HTTPS) to use it from elsewhere.
-      - "127.0.0.1:8090:8090"
-    networks: [proxy, internal]
+      - "8090:8090" # dashboard
 
-  db:
-    image: postgres:16
-    restart: unless-stopped
-    security_opt: ["no-new-privileges:true"]
-    environment:
-      # The superuser is only used by the init script; the API connects as
-      # the "ipvalet" role, which owns just its own database.
-      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
-      IPVALET_DB_PASSWORD_FILE: /run/secrets/ipvalet_db_password
-    secrets: [postgres_password, ipvalet_db_password]
-    volumes:
-      - db-data:/var/lib/postgresql/data
-      - ./postgres-init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "ipvalet"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-    networks: [internal] # never published
+    # To also join a network that already exists, such as one shared with a
+    # reverse proxy or another stack, list it on each service that needs it:
+    # networks: [default, shared]
 
-networks:
-  # Shared with your reverse proxy; create it there, or rename to match.
-  proxy:
-    external: true
-  # The database's network: no route to or from outside.
-  internal:
-    internal: true
-
-secrets:
-  ipvalet_database_url:
-    file: ./secrets/ipvalet_database_url
-  postgres_password:
-    file: ./secrets/postgres_password
-  ipvalet_db_password:
-    file: ./secrets/ipvalet_db_password
-  dashboard_api_key:
-    file: ./secrets/dashboard_api_key
+# networks:
+#   shared:
+#     external: true
 
 volumes:
   db-data:
   dashboard-data:
+
+# Secrets, for the *_FILE variables above. Each file holds one value; the
+# containers read them as /run/secrets/<name>. The API and the dashboard run
+# as uid 65532 and Postgres as uid 999, so each file must be readable by its
+# service's user.
+#
+# secrets:
+#   postgres_password:
+#     file: ./secrets/postgres_password
+#   ipvalet_database_url:
+#     file: ./secrets/ipvalet_database_url
+#   ipvalet_admin_key:
+#     file: ./secrets/ipvalet_admin_key
+#   dashboard_api_key:
+#     file: ./secrets/dashboard_api_key

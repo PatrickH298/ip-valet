@@ -114,7 +114,7 @@ func newHarness(t *testing.T, login *Login) *harness {
 		}
 	}
 	h := &harness{t: t, mux: http.NewServeMux(), ip: netip.MustParseAddr("192.0.2.1")}
-	h.l = &Local{Store: s, Sessions: NewSessions(time.Hour, time.Hour), Throttle: NewThrottle(3), Secure: true,
+	h.l = &Local{Store: s, Sessions: NewSessions(time.Hour, time.Hour), Throttle: NewThrottle(3), Cookies: CookiesSecure,
 		Log: discard(), Render: func(w http.ResponseWriter, r *http.Request, status int, v LoginView) {
 			h.view = v
 			w.WriteHeader(status)
@@ -252,7 +252,7 @@ func TestFormSignInGuards(t *testing.T) {
 	h := newHarness(t, &Login{Method: MethodForm, Username: "ops", Hash: hash(t, "a good password")})
 	// A session planted before sign-in is replaced, not adopted.
 	planted := h.l.Sessions.Create("ops")
-	h.jar = []*http.Cookie{{Name: h.l.CookieName(), Value: planted}}
+	h.jar = []*http.Cookie{{Name: secureSessionCookie, Value: planted}}
 	h.signIn("ops", "a good password")
 	if _, ok := h.l.Sessions.Get(planted); ok || h.jar[0].Value == planted {
 		t.Fatal("the planted session survived sign-in")
@@ -341,5 +341,57 @@ func TestBasicMethod(t *testing.T) {
 	h.l.Challenge(w, basic("ops", "another password"))
 	if w.Code != http.StatusTooManyRequests {
 		t.Fatalf("throttled challenge %d", w.Code)
+	}
+}
+
+func TestCookieModes(t *testing.T) {
+	trusted := []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")}
+	req := func(peer string, header ...string) *http.Request {
+		r := httptest.NewRequest("POST", "/login", nil)
+		r.RemoteAddr = peer
+		for i := 0; i+1 < len(header); i += 2 {
+			r.Header.Set(header[i], header[i+1])
+		}
+		return r
+	}
+	for _, c := range []struct {
+		r     *http.Request
+		https bool
+	}{
+		{req("192.0.2.1:1"), false},
+		{req("192.0.2.1:1", "Origin", "http://192.0.2.9:8090"), false},
+		{req("192.0.2.1:1", "Origin", "https://dash.example"), true},
+		{req("10.0.0.2:1", "X-Forwarded-Proto", "https"), true},
+		{req("192.0.2.1:1", "X-Forwarded-Proto", "https"), false}, // not from a trusted proxy
+	} {
+		if got := RequestIsHTTPS(c.r, trusted); got != c.https {
+			t.Errorf("%s %v: https %v", c.r.RemoteAddr, c.r.Header, got)
+		}
+	}
+	plain := req("192.0.2.1:1")
+	tls := req("192.0.2.1:1", "Origin", "https://dash.example")
+	for _, c := range []struct {
+		mode   CookieMode
+		r      *http.Request
+		secure bool
+	}{
+		{CookiesAuto, plain, false}, {CookiesAuto, tls, true},
+		{CookiesSecure, plain, true}, {CookiesPlain, tls, false},
+		{"", tls, true}, // the zero value is auto
+	} {
+		if got := c.mode.Secure(c.r); got != c.secure {
+			t.Errorf("mode %q https %v: secure %v", c.mode, c.r == tls, got)
+		}
+	}
+
+	// In auto mode, sign-in over plain HTTP sets a plain cookie, which identifies.
+	h := newHarness(t, &Login{Method: MethodForm, Username: "ops", Hash: hash(t, "a good password")})
+	h.l.Cookies = CookiesAuto
+	h.signIn("ops", "a good password")
+	if len(h.jar) != 1 || h.jar[0].Name != plainSessionCookie || h.jar[0].Secure {
+		t.Fatalf("plain HTTP cookie %+v", h.jar)
+	}
+	if h.who() != "ops" {
+		t.Fatal("the plain cookie does not identify")
 	}
 }

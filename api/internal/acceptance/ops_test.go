@@ -57,6 +57,37 @@ func TestConcurrentStartupMigratesOnce(t *testing.T) {
 	}
 }
 
+// TestCreatesItsDatabase starts the server against a database that does not
+// exist yet: it creates it, migrates it and serves.
+func TestCreatesItsDatabase(t *testing.T) {
+	t.Parallel()
+	base := testutilBaseURL(t)
+	if base == "" {
+		testutil.NewDatabase(t) // skips, or fails in CI
+	}
+	u, _ := url.Parse(base)
+	name := fmt.Sprintf("ipvalet_created_%d", time.Now().UnixNano())
+	u.Path = "/" + name
+	// Registered first, so it runs after the instance has stopped.
+	t.Cleanup(func() {
+		_, _ = pgxPool(t, base).Exec(context.Background(), `DROP DATABASE IF EXISTS `+name+` WITH (FORCE)`)
+	})
+	inst := testutil.StartInstance(t, testutil.Config(t, u.String(), nil))
+	resp, err := httpClient().Get(inst.URL + "/readyz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("readyz: %d", resp.StatusCode)
+	}
+	var migrated int
+	if err := pgxPool(t, u.String()).QueryRow(context.Background(),
+		`SELECT count(*) FROM goose_db_version WHERE version_id > 0`).Scan(&migrated); err != nil || migrated < 3 {
+		t.Fatalf("migrations in the created database: %d %v", migrated, err)
+	}
+}
+
 func TestPurge(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)

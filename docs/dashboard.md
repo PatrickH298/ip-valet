@@ -9,9 +9,11 @@ it does through that API.
 ## Shape
 
 ```
-browser ──HTTPS──▶ reverse proxy ──▶ dashboard ──HTTP──▶ API admin listener (:8081)
-                                     (:8090)             IPValet-On-Behalf-Of: <user>
+browser ──HTTP(S)──▶ [reverse proxy] ──▶ dashboard ──HTTP──▶ API admin listener (:8081)
+                                         (:8090)             IPValet-On-Behalf-Of: <user>
 ```
+
+A reverse proxy in front is optional; the dashboard serves plain HTTP itself.
 
 - **A separate component.** `dashboard/` in the repository is its own Go
   module, binary (`ipvalet-dashboard`), image
@@ -75,13 +77,15 @@ asks for a new password.
 **Sessions.** Each session has a random 256-bit id, kept in memory with the
 user name and timestamps. It ends after 30 minutes idle or 12 hours in all
 (both configurable), on sign-out, and when the login changes. A new id is
-issued at every sign-in. The cookie is `HttpOnly`, `SameSite=Lax` and, by
-default, `Secure` with the `__Host-` prefix, which browsers accept over HTTPS
-and on `http://localhost`. When a browser signs in from a plain-HTTP page
-elsewhere, the sign-in page says so instead of setting a cookie the browser
-would drop. Serving over plain HTTP needs
-`IPVALET_DASHBOARD_SECURE_COOKIES=false`; the server then logs a warning,
-because the password and the cookie cross the network in the clear.
+issued at every sign-in. The cookie is `HttpOnly` and `SameSite=Lax`.
+`IPVALET_DASHBOARD_SECURE_COOKIES` decides when it is also `Secure`, with the
+`__Host-` prefix: `auto` (the default) does so when the browser reached the
+dashboard over HTTPS (TLS to the dashboard, `X-Forwarded-Proto: https` from a
+trusted proxy, or an `https` origin on the form post), so plain HTTP and HTTPS
+both work; `true` always does, and the sign-in page then explains when a
+plain-HTTP page elsewhere than localhost cannot keep the cookie; `false` never
+does. Over plain HTTP, the password and the cookie cross the network
+unencrypted.
 
 **External sign-in (later).** OpenID Connect, with a provider such as
 authentik, replaces the local login: people are whoever the provider says, and
@@ -95,9 +99,10 @@ means adding another and its settings, and pages do not change.
 page, are throttled per client network (an IPv4 address or IPv6 /64), 10 a
 minute by default, as the API server does. Failures are not counted per user
 name, since that would let anyone lock out the login. A wrong user name costs
-the same bcrypt comparison as a wrong password. Behind a reverse proxy, the
-client address comes from `X-Forwarded-For` only when the proxy is listed in
-`IPVALET_DASHBOARD_TRUSTED_PROXIES`.
+the same bcrypt comparison as a wrong password. The client address comes from
+`X-Forwarded-For` when the peer is a trusted proxy:
+`IPVALET_DASHBOARD_TRUSTED_PROXIES` is `*` (every peer) by default, `none`, or a
+list of addresses and prefixes.
 
 ## Browser security
 
@@ -149,33 +154,31 @@ Lists page with the API's cursors. Times are shown in
 ## Configuration
 
 Environment variables only, as for the API server. Secrets also accept a
-`_FILE` variant.
+`_FILE` variant naming a file that holds the value, such as a Docker secret.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `IPVALET_DASHBOARD_LISTEN_ADDR` | `:8090` | Listen address (plain HTTP, behind the proxy) |
+| `IPVALET_DASHBOARD_LISTEN_ADDR` | `:8090` | Address the dashboard listens on (plain HTTP) |
 | `IPVALET_DASHBOARD_API_URL` | required | The API server's admin listener, for example `http://api:8081` |
 | `IPVALET_DASHBOARD_API_KEY` *(secret)* | required | The admin key the dashboard uses |
 | `IPVALET_DASHBOARD_API_TIMEOUT` | `10s` | Timeout for each API call |
 | `IPVALET_DASHBOARD_DATA_DIR` | `/data` | Writable directory that holds the login (`login.json`) |
-| `IPVALET_DASHBOARD_SECURE_COOKIES` | `true` | Mark the session cookie `Secure` (needs HTTPS in front) |
+| `IPVALET_DASHBOARD_SECURE_COOKIES` | `auto` | When cookies are `Secure`: `auto` (over HTTPS), `true` or `false` |
 | `IPVALET_DASHBOARD_SESSION_IDLE` | `30m` | Idle time that ends a session |
 | `IPVALET_DASHBOARD_SESSION_MAX` | `12h` | Longest a session lasts |
 | `IPVALET_DASHBOARD_LOGIN_FAILURES_PER_MINUTE` | `10` | Failed sign-ins allowed per client network per minute; `0` = off |
-| `IPVALET_DASHBOARD_TRUSTED_PROXIES` | unset | Proxies whose `X-Forwarded-For` is believed |
+| `IPVALET_DASHBOARD_TRUSTED_PROXIES` | `*` | Peers whose `X-Forwarded-For` and `X-Forwarded-Proto` are believed: `*`, `none`, or IPs and CIDR prefixes |
 | `IPVALET_DASHBOARD_TIMEZONE` | `UTC` | IANA time zone for displayed times |
 | `IPVALET_DASHBOARD_SHUTDOWN_TIMEOUT` | `15s` | Grace period for in-flight requests on shutdown |
 | `IPVALET_DASHBOARD_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 
 ## Deployment
 
-The dashboard joins the Compose example: on the internal network to reach the
-API's admin listener, with the API key mounted as a secret, a named volume at
-`/data` for its login, a read-only filesystem otherwise, and no capabilities.
-Its port is bound to the host only, like the admin port, so the default login
-is never exposed before it is changed. Expose it through the reverse proxy over HTTPS when it is
-needed from elsewhere; authentik or another forward-auth layer can sit in front
-as an extra gate.
+The dashboard is in the Compose example, on the same network as the API, with
+its API key as an environment variable (or, commented out, a Docker secret), a
+named volume at `/data` for its login, a read-only filesystem otherwise, and no
+capabilities. Where its port is published, and whether a proxy or a
+forward-auth layer such as authentik sits in front, is the deployer's choice.
 
 The dashboard's admin key should be its own named key with an expiry, created
 for it with `create-admin-key`, so that it can be revoked on its own and its

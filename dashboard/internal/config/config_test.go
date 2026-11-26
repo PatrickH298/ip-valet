@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 )
 
 const testKey = "ipv_aaaaaaaaaaaaaaaa_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -34,7 +36,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.ListenAddr != ":8090" || c.APIURL.String() != "http://api:8081" || c.APIKey != testKey ||
-		c.DataDir != "/data" || !c.SecureCookies || c.SessionIdle != 30*time.Minute || c.SessionMax != 12*time.Hour ||
+		c.DataDir != "/data" || c.Cookies != auth.CookiesAuto || len(c.TrustedProxies) != 2 || c.SessionIdle != 30*time.Minute || c.SessionMax != 12*time.Hour ||
 		c.LoginFailuresPerMinute != 10 || c.Location != time.UTC || c.APITimeout != 10*time.Second {
 		t.Fatalf("defaults: %+v", c)
 	}
@@ -66,7 +68,7 @@ func TestInvalid(t *testing.T) {
 		"no key":            {drop: []string{"IPVALET_DASHBOARD_API_KEY"}, want: "IPVALET_DASHBOARD_API_KEY: required"},
 		"bad key":           {set: map[string]string{"IPVALET_DASHBOARD_API_KEY": "secret"}, want: "must be an ip-valet key"},
 		"empty data dir":    {set: map[string]string{"IPVALET_DASHBOARD_DATA_DIR": ""}, want: "IPVALET_DASHBOARD_DATA_DIR"},
-		"cookies":           {set: map[string]string{"IPVALET_DASHBOARD_SECURE_COOKIES": "maybe"}, want: "true or false"},
+		"cookies":           {set: map[string]string{"IPVALET_DASHBOARD_SECURE_COOKIES": "maybe"}, want: "auto, true or false"},
 		"idle over max": {set: map[string]string{"IPVALET_DASHBOARD_SESSION_IDLE": "2h", "IPVALET_DASHBOARD_SESSION_MAX": "1h"},
 			want: "must not be longer"},
 		"proxy":     {set: map[string]string{"IPVALET_DASHBOARD_TRUSTED_PROXIES": "10.0.0.1, nope"}, want: `"nope"`},
@@ -99,7 +101,7 @@ func TestSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.DataDir != "/var/lib/ipvalet-dashboard" || len(c.TrustedProxies) != 2 || c.Location.String() != "Europe/Berlin" || c.SecureCookies {
+	if c.DataDir != "/var/lib/ipvalet-dashboard" || len(c.TrustedProxies) != 2 || c.Location.String() != "Europe/Berlin" || c.Cookies != auth.CookiesPlain {
 		t.Fatalf("%+v", c)
 	}
 }
