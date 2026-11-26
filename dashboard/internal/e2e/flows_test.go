@@ -334,10 +334,29 @@ func TestEntries(t *testing.T) {
 	}
 	d.get("/entries?prefix=not-a-prefix").must(t, 200, "The prefix filter")
 	d.get("/entries/"+id).must(t, 200, "8.8.1.1/32 for carol", "Delete this entry")
-	p := d.post("/entries/"+id+"/delete", nil).must(t, 200, "Delete 8.8.1.1/32 for carol?")
-	d.confirm(p).must(t, 200, "Entry deleted.", "removing")
+
+	// Deleting from the list returns to the list as filtered.
+	other := items(admin(t, 200, "GET", "/v1/admin/entries?realm="+s.Realm+"&user=dave", nil))[0]["id"].(string)
+	list := "/entries?realm=" + s.Realm + "&user=dave"
+	d.get(list).must(t, 200, `action="/entries/`+other+`/delete"`)
+	p := d.post("/entries/"+other+"/delete", url.Values{"back": {list}}).
+		must(t, 200, "Delete 8.8.1.2/32 for dave?", "In realm "+s.Realm+", group g.")
+	p = d.confirm(p).must(t, 200, "Deleted 8.8.1.2/32 for dave.")
+	if p.URL.RequestURI() != list {
+		t.Fatalf("after deleting from the list: %s", p.URL)
+	}
+	if e := admin(t, 200, "GET", "/v1/admin/entries/"+other, nil); e["deleted_at"] == nil {
+		t.Fatal("not deleted")
+	}
+	// The way back stays on this site.
+	p = d.post("/entries/"+id+"/delete", url.Values{"back": {"https://evil.example/"}})
+	if !strings.Contains(p.Body, `href="/entries/`+id+`"`) {
+		t.Fatal("an off-site back link was used")
+	}
+	p = d.post("/entries/"+id+"/delete", nil).must(t, 200, "Delete 8.8.1.1/32 for carol?")
+	d.confirm(p).must(t, 200, "Deleted 8.8.1.1/32 for carol.", "removing")
 	audit := items(admin(t, 200, "GET", "/v1/admin/audit?action=entry.delete&realm="+s.Realm, nil))
-	if len(audit) != 1 || audit[0]["on_behalf_of"] != "alice" {
+	if len(audit) != 2 || audit[0]["on_behalf_of"] != "alice" || audit[1]["on_behalf_of"] != "alice" {
 		t.Fatalf("audit %v", audit)
 	}
 }

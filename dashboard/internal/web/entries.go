@@ -2,18 +2,21 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/PatrickH298/ip-valet/dashboard/internal/api"
+	"github.com/PatrickH298/ip-valet/dashboard/internal/auth"
 )
 
 // entryStates are the states an entry can be in, for the filter.
 var entryStates = []string{"active", "pending", "partial", "rejected", "unrouted", "removing", "removed", "expired"}
 
 type entriesView struct {
+	Here    string // this page, for returning after a deletion
 	Filter  url.Values
 	Entries []api.Entry
 	Next    string
@@ -32,7 +35,7 @@ func (s *Server) entries(w http.ResponseWriter, r *http.Request) error {
 		Prefix: strings.TrimSpace(q.Get("prefix")), State: q.Get("state"), ClientID: q.Get("client_id"),
 		WorkerID: q.Get("worker_id"), IncludeEnded: q.Get("include_ended") == "on",
 	}
-	v := entriesView{Filter: q, Paged: q.Get("cursor") != "", States: entryStates}
+	v := entriesView{Here: r.URL.RequestURI(), Filter: q, Paged: q.Get("cursor") != "", States: entryStates}
 	page, err := s.API.Entries(r.Context(), f, api.PageQuery{Limit: 100, Cursor: q.Get("cursor")})
 	var ae *api.Error
 	switch {
@@ -110,11 +113,15 @@ func (s *Server) deleteEntry(w http.ResponseWriter, r *http.Request) error {
 	if err := r.ParseForm(); err != nil {
 		return err
 	}
+	// From the list, back is the list as filtered; otherwise the entry's page.
 	back := "/entries/" + url.PathEscape(id)
+	if b := auth.SafeNext(r.PostForm.Get("back")); b != "/" {
+		back = b
+	}
 	if !s.ask(w, r, "entries", confirmView{
 		Heading: "Delete " + e.Prefix + " for " + e.User + "?",
-		Message: "Every worker that holds the entry removes it; it reads removing until they confirm. " +
-			"The user can register the address again, within the realm's rules.",
+		Message: fmt.Sprintf("In realm %s, group %s. Every worker that holds the entry removes it; it reads removing "+
+			"until they confirm. The user can register the address again, within the realm's rules.", e.Realm, e.Group),
 		Button: "Delete entry", Danger: true, Cancel: back,
 	}) {
 		return nil
@@ -122,6 +129,6 @@ func (s *Server) deleteEntry(w http.ResponseWriter, r *http.Request) error {
 	if _, err := s.API.DeleteEntry(r.Context(), id); err != nil {
 		return err
 	}
-	s.redirect(w, r, back, &flash{Kind: "ok", Lines: []string{"Entry deleted."}})
+	s.redirect(w, r, back, &flash{Kind: "ok", Lines: []string{"Deleted " + e.Prefix + " for " + e.User + "."}})
 	return nil
 }
