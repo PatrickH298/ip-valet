@@ -155,9 +155,13 @@ removed.
 docker build -t ip-valet-unifi workers/unifi/
 ```
 
-Built from `gcr.io/distroless/static-debian12:nonroot`; runs as a non-root user.
-Its only writable path is `/data`, a volume for the cache. The
-[Compose example](../../deploy/README.md) runs it next to the API.
+Built from `gcr.io/distroless/static-debian12:nonroot`. It runs as a non-root
+user, uid and gid 65532, or as any other you give it (`docker run --user
+1000:1000`, or `user:` in Compose). Its only writable path is `/data`, a
+volume for the cache that any user can write to; a host folder mounted there
+instead must belong to the worker's user. The
+[Compose example](../../deploy/README.md#running-as-another-user) runs it next
+to the API.
 
 ## Development
 

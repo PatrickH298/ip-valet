@@ -100,9 +100,13 @@ docker build -t ip-valet-dashboard \
 ```
 
 The image is built from `gcr.io/distroless/static-debian12:nonroot`. It runs as
-a non-root user and exposes 8090. Its only writable path is `/data`, a volume
-owned by that user. The
-[Compose example](../deploy/README.md) runs it next to the API server.
+a non-root user, uid and gid 65532, or as any other you give it (`docker run
+--user 1000:1000`, or `user:` in Compose), and exposes 8090. Its only
+writable path is `/data`, a volume any user can write to; the login file
+there is readable only by the user that wrote it. A host folder mounted there
+instead must belong to the dashboard's user. The
+[Compose example](../deploy/README.md#running-as-another-user) runs it next to
+the API server and covers changing the user.
 
 ## Development
 

@@ -408,7 +408,8 @@ func (w *Worker) loadCache() {
 		err = json.Unmarshal(b, &c)
 	}
 	if err != nil || c.State == nil {
-		w.Log.Warn("ignoring an unreadable desired-state cache", "path", path, "error", fmt.Sprint(err))
+		w.Log.Warn("ignoring an unreadable desired-state cache", "path", path, "error", fmt.Sprint(err),
+			"uid", os.Getuid(), "gid", os.Getgid())
 		return
 	}
 	w.etag, w.state, w.revision, w.generatedAt = c.ETag, c.State, c.Revision, c.GeneratedAt
@@ -442,7 +443,7 @@ func (w *Worker) saveCache() {
 	if err != nil {
 		w.cacheBroken = true
 		w.Log.Warn("cannot write the desired-state cache; expiry while the API is down will not survive a restart",
-			"path", path, "error", err.Error())
+			"path", path, "error", err.Error(), "uid", os.Getuid(), "gid", os.Getgid())
 	}
 }
 

@@ -41,10 +41,13 @@ services:
       db:
         condition: service_healthy
     # Container hardening: no writable filesystem, no Linux capabilities, no
-    # privilege escalation. The image runs as a non-root user (uid 65532).
+    # privilege escalation.
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # The user the API runs as, as uid:gid; set both numbers. Default: the
+    # image's non-root user, 65532:65532. The API writes no files.
+    # user: "65532:65532"
     environment:
       # (required, secret) Postgres connection string. If the database does
       # not exist, the API creates it, provided the role may create databases.
@@ -112,6 +115,11 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # The user the dashboard runs as, as uid:gid; set both numbers. Default:
+    # the image's non-root user, 65532:65532. Any user can write to a new
+    # named volume; with a host folder instead, make this user its owner.
+    # Before changing it on a volume already in use, see deploy/README.md.
+    # user: "65532:65532"
     environment:
       # (required) URL of the API server's admin listener.
       IPVALET_DASHBOARD_API_URL: http://api:8081
@@ -161,6 +169,10 @@ services:
     read_only: true
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
+    # The user the worker runs as, as uid:gid; set both numbers. Default: the
+    # image's non-root user, 65532:65532. Any user can write to a new named
+    # volume; with a host folder instead, make this user its owner.
+    # user: "65532:65532"
     environment:
       # (required) URL of the ip-valet API's main listener (client and worker API).
       IPVALET_UNIFI_API_URL: http://api:8080
@@ -237,9 +249,9 @@ volumes:
   unifi-data:
 
 # Secrets, for the *_FILE variables above. Each file holds one value; the
-# containers read them as /run/secrets/<name>. The API, the dashboard and the
-# UniFi worker run as uid 65532 and Postgres as uid 999, so each file must be readable by its
-# service's user.
+# containers read them as /run/secrets/<name>, so each file must be readable
+# by the user its service runs as: uid 65532 for the API, the dashboard and
+# the UniFi worker (or the uid in their user: lines) and uid 999 for Postgres.
 #
 # secrets:
 #   postgres_password:

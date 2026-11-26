@@ -22,10 +22,14 @@ RUN CGO_ENABLED=0 go build -trimpath \
  && mkdir -p /out/data
 
 # Static, non-root, no shell. The only writable path is /data, which holds
-# the cached desired state; a new volume there takes its owner from the image.
+# the cached desired state. It runs as uid 65532 unless started as another
+# user (docker run --user, Compose user:). /data is writable by any user, so
+# that a new named volume, which copies its owner and mode from the image,
+# works for whichever one the container runs as; the files in it are private
+# to their owner.
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/ipvalet-unifi /usr/local/bin/ipvalet-unifi
-COPY --from=build --chown=65532:65532 /out/data /data
+COPY --from=build --chown=65532:65532 --chmod=0777 /out/data /data
 USER nonroot:nonroot
 VOLUME ["/data"]
 ENTRYPOINT ["/usr/local/bin/ipvalet-unifi"]

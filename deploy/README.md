@@ -109,7 +109,9 @@ can be read from a file by adding `_FILE` to its name. With Docker secrets:
    ```
 
 2. Make each file readable by the user its service runs as: 65532 for the API,
-   the dashboard and the UniFi worker, 999 for Postgres.
+   the dashboard and the UniFi worker (or the uid in their `user:` lines; see
+   [Running as another user](#running-as-another-user)), 999 for Postgres.
+   With the default users:
 
    ```bash
    sudo chown 65532 secrets/ipvalet_database_url secrets/dashboard_api_key && sudo chown 999 secrets/postgres_password && sudo chmod 0400 secrets/*
@@ -118,6 +120,39 @@ can be read from a file by adding `_FILE` to its name. With Docker secrets:
 3. In `compose.yaml`, uncomment the `secrets:` block at the end, each service's
    `secrets:` line and its `*_FILE` variables, and remove the plain variables
    they replace (a variable and its `_FILE` form together are an error).
+
+## Running as another user
+
+The API, the dashboard and the UniFi worker run as uid and gid 65532 unless
+you choose another user. To choose one, uncomment the service's `user:` line
+and set both numbers, for example `user: "1000:1000"`. The container still
+runs without root, without Linux capabilities and on a read-only filesystem.
+
+- **Named volumes**, as in the example (`dashboard-data`, `unifi-data`), need
+  nothing more. A new volume copies `/data` from the image, where any user may
+  write, and each file a service writes there is readable only by that user.
+- **A host folder** in place of a volume (`./dashboard-data:/data`) must be
+  writable by the user. Create it and make them its owner:
+
+  ```bash
+  mkdir -p dashboard-data && sudo chown 1000:1000 dashboard-data && chmod 0700 dashboard-data
+  ```
+
+- **Secrets** must be readable by the user (step 2 of
+  [Using secrets](#using-secrets-instead-of-environment-variables)).
+- **Changing the user later.** Files already in `/data` stay with the old
+  user. The dashboard then does not start, and its error names the user it
+  runs as; the UniFi worker logs that it cannot read its cache and writes a
+  new one once the API answers. Give both volumes to the new user, then
+  recreate the containers:
+
+  ```bash
+  docker run --rm -v ip-valet_dashboard-data:/dashboard -v ip-valet_unifi-data:/unifi busybox chown -R 1000:1000 /dashboard /unifi
+  ```
+
+  ```bash
+  docker compose up -d
+  ```
 
 ## Client addresses and proxies
 
@@ -152,7 +187,8 @@ over HTTPS, directly or through a proxy that sends `X-Forwarded-Proto`
 - **Container settings.** The example runs the API, the dashboard and the
   UniFi worker with a read-only filesystem (the dashboard and the worker write
   only to their `/data` volumes), no Linux capabilities and
-  `no-new-privileges`. The images run as uid 65532.
+  `no-new-privileges`. The images run as uid 65532; see
+  [Running as another user](#running-as-another-user) to change it.
 
 ## Optional: a database role with fewer rights
 

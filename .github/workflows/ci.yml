@@ -252,8 +252,22 @@ jobs:
         env:
           COMPONENT: ${{ matrix.component.name }}
         run: |
-          docker run --rm "ip-valet-$COMPONENT:ci" version
-          test "$(docker inspect -f '{{.Config.User}}' "ip-valet-$COMPONENT:ci")" = "nonroot:nonroot"
+          set -euo pipefail
+          image="ip-valet-$COMPONENT:ci"
+          docker run --rm "$image" version
+          test "$(docker inspect -f '{{.Config.User}}' "$image")" = "nonroot:nonroot"
+          # Any uid:gid runs it (Compose user:), hardened as the example runs it.
+          docker run --rm --user 12345:23456 --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true "$image" version
+          # A /data volume is writable by that user too: a new named volume
+          # copies its owner and mode from the image.
+          if docker inspect -f '{{json .Config.Volumes}}' "$image" | grep -q '"/data"'; then
+            id="$(docker create "$image")"
+            mode="$(docker export "$id" | tar -tvf - | awk '$NF == "data/" { print $1 }')"
+            docker rm "$id" > /dev/null
+            echo "/data: $mode"
+            test "$mode" = drwxrwxrwx
+          fi
       - name: Push to GHCR
         if: steps.meta.outputs.push == 'true'
         env:

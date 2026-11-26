@@ -88,7 +88,8 @@ func Main(ctx context.Context, args []string, env Env) int {
 	}
 	if cfg.DataDir != "" {
 		if err := os.MkdirAll(cfg.DataDir, 0o700); err != nil {
-			log.Warn("cannot use IPVALET_UNIFI_DATA_DIR; desired state is kept in memory only", "error", err.Error())
+			log.Warn("cannot use IPVALET_UNIFI_DATA_DIR; desired state is kept in memory only", "error", err.Error(),
+				"uid", os.Getuid(), "gid", os.Getgid())
 			cfg.DataDir = ""
 		}
 	}

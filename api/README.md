@@ -127,9 +127,11 @@ docker build -t ip-valet-api \
 ```
 
 The image is built from `gcr.io/distroless/static-debian12:nonroot`. It runs as
-a non-root user, needs no writable filesystem and exposes 8080 (client and
-worker API), 8081 (admin API) and 9090 (metrics). For a Compose setup with
-Postgres and the dashboard, see [`deploy/`](../deploy/README.md).
+a non-root user, uid and gid 65532, or as any other you give it (`docker run
+--user 1000:1000`, or `user:` in Compose). It needs no writable filesystem
+and exposes 8080 (client and worker API), 8081 (admin API) and 9090
+(metrics). For a Compose setup with Postgres and the dashboard, see
+[`deploy/`](../deploy/README.md).
 
 ## Development
 
