@@ -35,7 +35,7 @@ services:
       retries: 20
 
   api:
-    image: ghcr.io/patrickh298/ip-valet-api:0.1.0
+    image: ghcr.io/patrickh298/ip-valet-api:main # built from main; pin a release tag once there is one
     restart: unless-stopped
     depends_on:
       db:
@@ -106,7 +106,7 @@ services:
       # - "9090:9090" # Prometheus metrics
 
   dashboard:
-    image: ghcr.io/patrickh298/ip-valet-dashboard:main # pin a release tag once one exists
+    image: ghcr.io/patrickh298/ip-valet-dashboard:main # built from main; pin a release tag once there is one
     restart: unless-stopped
     depends_on: [api]
     read_only: true
