@@ -11,6 +11,24 @@ import (
 	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/rules"
 )
 
+func TestRenderMessage(t *testing.T) {
+	for in, want := range map[string]string{
+		"Welcome to ip-valet": "Welcome to ip-valet",
+		"<b>bold</b> & more":  "&lt;b&gt;bold&lt;/b&gt; &amp; more",
+		"Then go to https://intranet.example.com/start.": `Then go to <a href="https://intranet.example.com/start" rel="noopener noreferrer">` +
+			`https://intranet.example.com/start</a>.`,
+		"(see http://a.example/x?y=1&z=2)": `(see <a href="http://a.example/x?y=1&amp;z=2" rel="noopener noreferrer">` +
+			`http://a.example/x?y=1&amp;z=2</a>)`,
+		`https://x.example/"><script>`:        `<a href="https://x.example/" rel="noopener noreferrer">https://x.example/</a>&#34;&gt;&lt;script&gt;`,
+		"javascript:alert(1) and example.com": "javascript:alert(1) and example.com",
+		"https:// alone":                      "https:// alone",
+	} {
+		if got := string(renderMessage(in)); got != want {
+			t.Errorf("%q:\n got %s\nwant %s", in, got, want)
+		}
+	}
+}
+
 func TestSubnets(t *testing.T) {
 	if got := subnets(32, 28, 32); len(got) != 5 || got[0] != 32 || got[4] != 28 {
 		t.Fatal(got)
@@ -89,6 +107,30 @@ func TestParseManual(t *testing.T) {
 	for in, want := range bad {
 		if _, problem := s.parseManual(in); !strings.Contains(problem, want) {
 			t.Errorf("%q: %q, want %q", in, problem, want)
+		}
+	}
+}
+
+func TestWorkerDetail(t *testing.T) {
+	e := ipvalet.Entry{Prefix: "2a00:1450::/64", State: "partial", Workers: []ipvalet.WorkerState{
+		{Label: "Home", State: "active"},
+		{Label: "Office", State: "rejected", Code: "family_unsupported"},
+		{Label: "Lab", State: "rejected", Code: "something_new"},
+	}}
+	if got := workerDetail(e); got != "Office does not take IPv6 addresses. Lab did not accept it (something_new)." {
+		t.Fatal(got)
+	}
+	e.State = "active"
+	if got := workerDetail(e); got != "" {
+		t.Fatal(got)
+	}
+	for code, want := range map[string]string{
+		"prefix_too_broad": "does not accept a subnet this wide", "address_not_allowed": "does not accept this kind of address",
+		"capacity_exceeded": "is full", "no_matching_rule": "is not set up to take this address",
+		"invalid": "could not use this address", "": "did not accept it",
+	} {
+		if got := workerReason(code, "IPv4"); got != want {
+			t.Errorf("%s: %q", code, got)
 		}
 	}
 }

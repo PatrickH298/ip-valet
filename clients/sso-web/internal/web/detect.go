@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/httpx"
+	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/rules"
 )
 
 // Address detection. The page knows the address its own connection came
@@ -45,6 +46,7 @@ type detectAnswer struct {
 	Address string `json:"address,omitempty"`
 	Family  string `json:"family,omitempty"`
 	Proof   string `json:"proof,omitempty"`
+	Private bool   `json:"private,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -74,7 +76,8 @@ func (s *Server) detect(w http.ResponseWriter, r *http.Request) {
 		write(http.StatusInternalServerError, detectAnswer{Error: "internal error"})
 		return
 	}
-	write(http.StatusOK, detectAnswer{Address: ip.String(), Family: family(ip), Proof: proof})
+	write(http.StatusOK, detectAnswer{Address: ip.String(), Family: family(ip), Proof: proof,
+		Private: rules.IsPrivate(netip.PrefixFrom(ip, ip.BitLen()))})
 }
 
 // detected returns the addresses a register form may use: the one its own

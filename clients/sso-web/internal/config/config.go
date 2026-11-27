@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/httpx"
 	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/rules"
@@ -51,6 +52,7 @@ type Config struct {
 	DetectListenAddr string   // a second listener serving only address detection; "" = none
 	PublicURL        *url.URL // where people reach the site, without a trailing slash
 	Title            string
+	Message          string // shown at the top of the page; "" = none
 
 	APIURL     *url.URL // the API server's main listener
 	APIKey     string   // a client key
@@ -87,6 +89,9 @@ type ReadFile func(string) ([]byte, error)
 
 // Environ lists NAME=value pairs; os.Environ in production.
 type Environ func() []string
+
+// MaxMessage is the longest IPVALET_SSO_MESSAGE, in characters.
+const MaxMessage = 4000
 
 // RulePrefix starts the name of every rule variable.
 const RulePrefix = "IPVALET_SSO_RULE_"
@@ -203,6 +208,15 @@ func Load(getenv Getenv, read ReadFile, environ Environ) (Config, error) {
 	c.Title = strings.TrimSpace(l.raw("IPVALET_SSO_TITLE", "ip-valet"))
 	if c.Title == "" {
 		l.fail("IPVALET_SSO_TITLE", "must not be empty")
+	}
+	if msg, ok := l.secret("IPVALET_SSO_MESSAGE"); ok {
+		c.Message = strings.TrimSpace(strings.ReplaceAll(msg, "\r\n", "\n"))
+		switch {
+		case !utf8.ValidString(c.Message):
+			l.fail("IPVALET_SSO_MESSAGE", "must be UTF-8 text")
+		case utf8.RuneCountInString(c.Message) > MaxMessage:
+			l.fail("IPVALET_SSO_MESSAGE", "must be at most %d characters", MaxMessage)
+		}
 	}
 
 	if raw := l.required("IPVALET_SSO_API_URL", "the API server's main listener, for example http://api:8080"); raw != "" {

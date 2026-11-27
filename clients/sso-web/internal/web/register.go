@@ -43,6 +43,13 @@ func (s *Server) register(ctx context.Context, user string, grants []rules.Grant
 				out = append(out, o)
 				continue
 			}
+			if !g.Private && rules.IsPrivate(p) {
+				o.Code, o.Message = "private_address", fmt.Sprintf("%s does not accept private addresses.", g.Realm)
+				s.Log.Info("registration refused", "user", user, "realm", g.Realm, "group", g.Group, "prefix", p.String(),
+					"code", o.Code)
+				out = append(out, o)
+				continue
+			}
 			asked := ttl(g)
 			sub := ipvalet.Submission{Realm: g.Realm, User: user, Groups: []string{g.Group}, Prefix: p.String(), TTL: asked.String()}
 			res, err := s.API.Submit(ctx, sub)

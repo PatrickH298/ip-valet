@@ -1562,7 +1562,7 @@ paths:
           schema: { type: string }
         - name: action
           in: query
-          description: For example `entry.create`, `entry.replace`, `entry.delete`, `entry.shorten`, `rule.update`.
+          description: For example `entry.create`, `entry.replace`, `entry.delete`, `entry.shorten`, `entry.reject` (a worker refused an entry; `details` has its `code` and `detail`), `rule.update`.
           schema: { type: string }
         - $ref: "#/components/parameters/Limit"
         - $ref: "#/components/parameters/Cursor"

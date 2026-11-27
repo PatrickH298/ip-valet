@@ -6,6 +6,9 @@ import (
 	"html/template"
 	"io/fs"
 	"net/http"
+	"net/url"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -50,6 +53,32 @@ func staticHandler() http.Handler {
 		w.Header().Set("Cache-Control", "public, max-age=3600")
 		files.ServeHTTP(w, r)
 	}))
+}
+
+var linkPattern = regexp.MustCompile(`https?://[^\s<>"']+`)
+
+// renderMessage turns the administrator's message into HTML: the text
+// escaped, and each http or https URL in it a link. Punctuation after a URL
+// is left out of it; line breaks are kept by the stylesheet.
+func renderMessage(msg string) template.HTML {
+	var b strings.Builder
+	last := 0
+	for _, m := range linkPattern.FindAllStringIndex(msg, -1) {
+		start, end := m[0], m[1]
+		for end > start && strings.ContainsRune(".,;:!?)]}'\"", rune(msg[end-1])) {
+			end--
+		}
+		link := msg[start:end]
+		if u, err := url.Parse(link); err != nil || u.Host == "" {
+			continue
+		}
+		b.WriteString(template.HTMLEscapeString(msg[last:start]))
+		b.WriteString(`<a href="` + template.HTMLEscapeString(link) + `" rel="noopener noreferrer">` +
+			template.HTMLEscapeString(link) + `</a>`)
+		last = end
+	}
+	b.WriteString(template.HTMLEscapeString(msg[last:]))
+	return template.HTML(b.String()) //nolint:gosec // built from escaped text and checked URLs
 }
 
 // page is what every template gets.

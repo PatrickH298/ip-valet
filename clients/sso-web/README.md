@@ -8,13 +8,22 @@ the realms' rules, workers and audit log apply as for any other client.
 
 Once signed in, a person sees:
 
+- **Your message**, if you set one (`IPVALET_SSO_MESSAGE`, or
+  `IPVALET_SSO_MESSAGE_FILE` for a longer one): a welcome, or where to go once
+  registered. It is plain text; line breaks are kept and `http://` and
+  `https://` links become clickable.
 - **Register this device**: their detected IPv4 and IPv6 addresses, a subnet
   for each (by default /32 and /64), and one button that registers them in
   every realm their rules allow.
 - **Enter an address** (only if a rule allows it): any address or subnet,
   kept for a time they choose, within the limits.
 - **Registered addresses**: what they have registered, where, its state and
-  when it expires, with a Revoke button for each address.
+  when it expires, with a Revoke button for each address. States update by
+  themselves while a worker applies an address ("Being applied" becomes
+  "Active"). When a worker refuses one, the page says why in plain words (for
+  example "Firewall does not accept this kind of address"), without the rule
+  behind it. The worker's full reason is in the API's audit log
+  (`entry.reject`) and in the worker's log.
 
 Someone the IdP signs in but no rule takes gets a "No access" page and no
 session.
@@ -57,6 +66,7 @@ space-separated `key=value` pairs:
 | `max_ttl` | (required) | The longest a person may keep an address: `90m`, `12h`, `30d` or `unlimited` |
 | `ttl` | `max_ttl` | How long one click keeps it |
 | `manual` | `no` | `yes` lets people type in addresses as well |
+| `private` | `no` | `yes` lets people register private addresses: RFC 1918, `100.64.0.0/10` and `fc00::/7` |
 
 A person gets every rule that takes them. Someone in groups `a` and `b`, with
 one rule sending `a` to realm A and another sending `b` to realm B, has each
@@ -66,7 +76,7 @@ Several rules that send someone to the **same realm** merge into one, and the
 most permissive wins:
 
 - **Lifetimes:** the longest `max_ttl` and the longest `ttl`.
-- **Manual entry:** allowed if any of them allows it.
+- **Manual entry and private addresses:** allowed if any of them allows them.
 - **Group:** the entry carries the group of the most permissive rule. That is
   the one with the longest `max_ttl`; on a tie, one that allows manual entry,
   then the longest `ttl`, then the first by name.
@@ -103,6 +113,13 @@ plain words:
 - **TTL, manual entry:** the person is told the limit.
 
 Each realm is submitted separately, so a limit in one never blocks another.
+
+**Private addresses.** A rule without `private=yes` refuses private
+addresses, and subnets that overlap one, before anything reaches the API:
+"office does not accept private addresses." With `private=yes` they go on to
+the realm's own rules. A new realm's IP rules also deny private ranges, so
+allow them there too, and in the worker that applies them (the UniFi worker's
+`addresses=private` or `both`). The page tags a detected private address.
 
 ## Identity providers
 

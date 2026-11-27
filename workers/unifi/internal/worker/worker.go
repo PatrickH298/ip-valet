@@ -60,6 +60,7 @@ type Worker struct {
 	revision    int64
 	generatedAt string
 	cacheBroken bool
+	refused     map[netip.Prefix]string // the last sync's rejections, code and detail
 }
 
 // New checks the rules' lists and returns a worker.
@@ -192,6 +193,7 @@ func (w *Worker) Sync(ctx context.Context) Result {
 	}
 	plan := rules.Build(w.entries(), w.Config.Rules, w.Config.Floor, w.Now())
 	res.NextExpiry, res.Rejected = plan.NextExpiry, len(plan.Rejections)
+	w.logRejections(plan.Rejections)
 	res.Changed, res.Err = w.apply(ctx, plan)
 	if res.FromAPI {
 		if err := w.report(ctx, plan, res.Err); err != nil {
@@ -366,6 +368,20 @@ func (w *Worker) report(ctx context.Context, plan rules.Plan, applyErr error) er
 		}
 	}
 	return w.API.Report(ctx, r)
+}
+
+// logRejections logs each rejection that is new, or whose reason changed,
+// once: every sync rejects the same prefixes again.
+func (w *Worker) logRejections(rs []rules.Rejection) {
+	now := make(map[netip.Prefix]string, len(rs))
+	for _, r := range rs {
+		why := r.Code + ": " + r.Detail
+		now[r.Prefix] = why
+		if w.refused[r.Prefix] != why {
+			w.Log.Info("address refused", "prefix", r.Prefix.String(), "code", r.Code, "detail", r.Detail)
+		}
+	}
+	w.refused = now
 }
 
 func truncate(s string, n int) string {

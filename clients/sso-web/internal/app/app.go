@@ -143,7 +143,7 @@ func Start(ctx context.Context, cfg config.Config, log *slog.Logger) (*Site, err
 	site := &Site{Sessions: web.NewSessions(cfg.SessionIdle, cfg.SessionMax), log: log}
 	w, err := web.New(web.Options{
 		API: client, Sessions: site.Sessions, Sealer: sealer, Rules: cfg.Rules, Log: log, Location: cfg.Location,
-		PublicURL: cfg.PublicURL, Title: cfg.Title, DetectV4: cfg.DetectV4URL, DetectV6: cfg.DetectV6URL,
+		PublicURL: cfg.PublicURL, Title: cfg.Title, Message: cfg.Message, DetectV4: cfg.DetectV4URL, DetectV6: cfg.DetectV6URL,
 		DefaultSubnetV4: cfg.DefaultSubnetV4, DefaultSubnetV6: cfg.DefaultSubnetV6,
 		MaxSubnetV4: cfg.MaxSubnetV4, MaxSubnetV6: cfg.MaxSubnetV6,
 		Cookies: cfg.Cookies, TrustedProxies: cfg.TrustedProxies, TrustAll: cfg.TrustAll, LogoutURL: cfg.LogoutURL,

@@ -38,6 +38,7 @@ var env struct {
 	apiAdmin  string
 	adminKey  string
 	clientKey string
+	workerKey string // the "fw" worker's, which applies office and vpn
 }
 
 func TestMain(m *testing.M) { os.Exit(run(m)) }
@@ -154,6 +155,12 @@ func setup() error {
 		return fmt.Errorf("key: %d %v", st, k)
 	}
 	env.clientKey = k["key"].(string)
+	st, wk := call(env.apiAdmin, env.adminKey, "POST", "/v1/admin/keys", map[string]any{"kind": "worker",
+		"worker_id": w["id"], "name": "fw"})
+	if st != 201 {
+		return fmt.Errorf("worker key: %d %v", st, wk)
+	}
+	env.workerKey = wk["key"].(string)
 	return nil
 }
 

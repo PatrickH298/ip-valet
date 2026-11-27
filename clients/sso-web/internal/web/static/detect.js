@@ -46,6 +46,10 @@
         }
         row.setAttribute("data-state", "detected");
         out.textContent = d.address;
+        var tag = row.querySelector(".private-tag");
+        if (tag) {
+          tag.hidden = !d.private;
+        }
         if (select) {
           select.disabled = false;
         }

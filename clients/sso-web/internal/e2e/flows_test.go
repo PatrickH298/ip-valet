@@ -71,7 +71,8 @@ func TestRegisterAndRevoke(t *testing.T) {
 	}
 	mustContain(t, home, "Your addresses", "ann", "8.8.8.8", `data-detect-url="`+s.detect+`"`,
 		"Registers them in office for 7 days and in vpn for 7 days.", "Enter an address", "You have no registered addresses",
-		"vpn : one click keeps addresses for 7 days; you may also enter addresses, kept for up to 30 days.")
+		`<option value="30d">30 days</option>`, "Goes to vpn.")
+	mustNotContain(t, home, "Where your addresses go")
 
 	got := detect(t, s, detectToken(t, home), "2a00:1450:4001:80b::1234")
 	if got["family"] != "ipv6" || got["address"] != "2a00:1450:4001:80b::1234" || got["proof"] == "" {
@@ -160,18 +161,20 @@ func TestUserRuleAndUserinfoGroups(t *testing.T) {
 	idp.mu.Unlock()
 	s := startSite(t, with(idp.env(), rulesEnv(map[string]string{
 		"IPVALET_SSO_RULE_BOSS": "user=boss realm=office as=management max_ttl=unlimited ttl=12h",
+		"IPVALET_SSO_MESSAGE":   "Welcome to <ip-valet>!\nOnce registered, go to https://intranet.example.com.",
 	})))
 	// Groups only in userinfo still count.
 	idp.signInAs("carl", "vpn-users")
 	b := newBrowser(t, "9.9.9.9")
 	p := b.get(s.base + "/")
-	mustContain(t, p, "Registers them in vpn for 7 days.")
+	mustContain(t, p, "Registers them in vpn for 7 days.", `<div class="card notice">Welcome to &lt;ip-valet&gt;!
+Once registered, go to <a href="https://intranet.example.com" rel="noopener noreferrer">https://intranet.example.com</a>.</div>`)
 	mustNotContain(t, p, "office")
 	// A user rule needs no group; its entries carry the rule's group.
 	idp.signInAs("boss")
 	b = newBrowser(t, "9.9.9.10")
 	p = b.get(s.base + "/")
-	mustContain(t, p, "office for 12 hours.", "one click keeps addresses for 12 hours.")
+	mustContain(t, p, "Registers them in office for 12 hours.")
 	mustNotContain(t, p, "Enter an address")
 	p = b.post(s.base+"/register", s.base, url.Values{})
 	mustContain(t, p, "9.9.9.10/32 in office")
@@ -241,8 +244,8 @@ func TestSameRealmMostPermissive(t *testing.T) {
 	idp.signInAs("patrick", "users", "admins")
 	b := newBrowser(t, "8.8.8.9")
 	p := b.get(s.base + "/")
-	mustContain(t, p, "Registers them in office for 1 day.", "Enter an address",
-		"office : one click keeps addresses for 1 day; you may also enter addresses, kept for up to 1 day.")
+	mustContain(t, p, "Registers them in office for 1 day.", "Enter an address", `<option value="1d" selected>1 day</option>`)
+	mustNotContain(t, p, "Registers them in office for 12 hours")
 	p = b.post(s.base+"/register", s.base, url.Values{})
 	mustContain(t, p, "Registered", "8.8.8.9/32 in office, until")
 	es := entries(t, "patrick")
@@ -265,5 +268,109 @@ func TestSameRealmMostPermissive(t *testing.T) {
 	p = b.post(s.base+"/register/manual", s.base, url.Values{"address": {"1.0.0.2"}, "ttl": {"1h"}})
 	if p.status != http.StatusForbidden {
 		t.Fatalf("manual entry without a manual rule: %d", p.status)
+	}
+}
+
+// A rule without private=yes refuses private addresses itself; one with it
+// leaves them to the realm's rules.
+func TestPrivateAddresses(t *testing.T) {
+	if env.skip != "" {
+		t.Skip(env.skip)
+	}
+	idp := newFakeOIDC(t)
+	s := startSite(t, with(idp.env(), map[string]string{
+		"IPVALET_SSO_RULE_VPN": "group=vpn-users realm=vpn max_ttl=30d manual=yes",
+		"IPVALET_SSO_RULE_LAN": "group=lan realm=office max_ttl=1d manual=yes private=yes",
+	}))
+	idp.signInAs("pia", "vpn-users", "lan")
+	b := newBrowser(t, "192.168.1.10")
+	p := b.get(s.base + "/")
+	mustContain(t, p, "192.168.1.10", `class="tag private-tag">private`)
+	p = b.post(s.base+"/register", s.base, url.Values{})
+	// vpn: refused by sso-web. office: sent on; the realm's seeded IP rules refuse it.
+	mustContain(t, p, "Nothing was registered", "192.168.1.10/32 in vpn: vpn does not accept private addresses.",
+		"192.168.1.10/32 in office: office does not accept this address.")
+	p = b.post(s.base+"/register/manual", s.base, url.Values{"address": {"fd00:1::/64"}, "ttl": {"1d"}})
+	mustContain(t, p, "fd00:1::/64 in vpn: vpn does not accept private addresses.")
+	p = b.post(s.base+"/register/manual", s.base, url.Values{"address": {"1.0.0.1"}, "ttl": {"1d"}})
+	mustContain(t, p, "Registered", "1.0.0.1/32 in office", "1.0.0.1/32 in vpn")
+}
+
+// The page's /status follows entries as the worker applies or refuses them,
+// and a refusal is explained, and audited by the API.
+func TestLiveStatus(t *testing.T) {
+	if env.skip != "" {
+		t.Skip(env.skip)
+	}
+	idp := newFakeOIDC(t)
+	s := startSite(t, with(idp.env(), map[string]string{"IPVALET_SSO_RULE_VPN": "group=vpn-users realm=vpn max_ttl=1d"}))
+	idp.signInAs("liv", "vpn-users")
+	b := newBrowser(t, "8.8.8.20")
+	if p := b.get(s.base + "/"); strings.Contains(p.body, `private-tag">private`) {
+		t.Fatal("a public address tagged private")
+	}
+	p := b.post(s.base+"/register", s.base, url.Values{})
+	mustContain(t, p, `data-state="pending"`, "Being applied", `src="/static/status.js"`)
+	status := func() map[string]string {
+		t.Helper()
+		p := b.get(s.base + "/status")
+		var out struct {
+			Entries []map[string]string `json:"entries"`
+		}
+		if err := json.Unmarshal([]byte(p.body), &out); err != nil || p.status != 200 || len(out.Entries) != 1 {
+			t.Fatalf("%d %s", p.status, p.body)
+		}
+		return out.Entries[0]
+	}
+	if e := status(); e["state"] != "pending" || e["label"] != "Being applied" || e["detail"] != "" {
+		t.Fatalf("%v", e)
+	}
+	// The worker applies the current revision.
+	st, ds := call(env.apiPublic, env.workerKey, "GET", "/v1/worker/desired-state", nil)
+	if st != 200 {
+		t.Fatalf("desired state: %d %v", st, ds)
+	}
+	report := func(rejected ...map[string]any) {
+		t.Helper()
+		if rejected == nil {
+			rejected = []map[string]any{}
+		}
+		if st, out := call(env.apiPublic, env.workerKey, "POST", "/v1/worker/status", map[string]any{"instance": "fw-1",
+			"revision": ds["revision"], "generated_at": ds["generated_at"], "rejected": rejected}); st != 200 {
+			t.Fatalf("report: %d %v", st, out)
+		}
+	}
+	report()
+	if e := status(); e["state"] != "active" || e["label"] != "Active" {
+		t.Fatalf("%v", e)
+	}
+	// Now it refuses it: the page explains, the API audits.
+	report(map[string]any{"prefix": "8.8.8.20/32", "code": "no_matching_rule", "detail": "no rule takes realm vpn"})
+	if e := status(); e["state"] != "rejected" || e["label"] != "Refused" ||
+		e["detail"] != "Firewall is not set up to take this address." {
+		t.Fatalf("%v", e)
+	}
+	st, audit := call(env.apiAdmin, env.adminKey, "GET", "/v1/admin/audit?action=entry.reject&realm=vpn", nil)
+	found := false
+	for _, it := range audit["items"].([]any) {
+		r := it.(map[string]any)
+		d := r["details"].(map[string]any)
+		if r["user"] == "liv" && r["prefix"] == "8.8.8.20/32" && d["code"] == "no_matching_rule" && d["detail"] == "no rule takes realm vpn" {
+			found = true
+		}
+	}
+	if st != 200 || !found {
+		t.Fatalf("no audit row: %d %v", st, audit)
+	}
+	report() // leave the worker with nothing refused, for other tests
+	// /status needs a session: without one, it sends the browser to sign in.
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := noFollow.Get(s.base + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusSeeOther || !strings.HasPrefix(resp.Header.Get("Location"), "/login?next=") {
+		t.Fatalf("status without a session: %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 }
