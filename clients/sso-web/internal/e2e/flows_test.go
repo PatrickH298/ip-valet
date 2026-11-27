@@ -71,7 +71,8 @@ func TestRegisterAndRevoke(t *testing.T) {
 	}
 	mustContain(t, home, "Your addresses", "ann", "8.8.8.8", `data-detect-url="`+s.detect+`"`,
 		"Registers them in office for 7 days and in vpn for 7 days.", "Enter an address", "You have no registered addresses",
-		"vpn : one click keeps addresses for 7 days; you may also enter addresses, kept for up to 30 days.")
+		`<option value="30d">30 days</option>`, "Goes to vpn.")
+	mustNotContain(t, home, "Where your addresses go")
 
 	got := detect(t, s, detectToken(t, home), "2a00:1450:4001:80b::1234")
 	if got["family"] != "ipv6" || got["address"] != "2a00:1450:4001:80b::1234" || got["proof"] == "" {
@@ -160,18 +161,20 @@ func TestUserRuleAndUserinfoGroups(t *testing.T) {
 	idp.mu.Unlock()
 	s := startSite(t, with(idp.env(), rulesEnv(map[string]string{
 		"IPVALET_SSO_RULE_BOSS": "user=boss realm=office as=management max_ttl=unlimited ttl=12h",
+		"IPVALET_SSO_MESSAGE":   "Welcome to <ip-valet>!\nOnce registered, go to https://intranet.example.com.",
 	})))
 	// Groups only in userinfo still count.
 	idp.signInAs("carl", "vpn-users")
 	b := newBrowser(t, "9.9.9.9")
 	p := b.get(s.base + "/")
-	mustContain(t, p, "Registers them in vpn for 7 days.")
+	mustContain(t, p, "Registers them in vpn for 7 days.", `<div class="card notice">Welcome to &lt;ip-valet&gt;!
+Once registered, go to <a href="https://intranet.example.com" rel="noopener noreferrer">https://intranet.example.com</a>.</div>`)
 	mustNotContain(t, p, "office")
 	// A user rule needs no group; its entries carry the rule's group.
 	idp.signInAs("boss")
 	b = newBrowser(t, "9.9.9.10")
 	p = b.get(s.base + "/")
-	mustContain(t, p, "office for 12 hours.", "one click keeps addresses for 12 hours.")
+	mustContain(t, p, "Registers them in office for 12 hours.")
 	mustNotContain(t, p, "Enter an address")
 	p = b.post(s.base+"/register", s.base, url.Values{})
 	mustContain(t, p, "9.9.9.10/32 in office")
@@ -241,8 +244,8 @@ func TestSameRealmMostPermissive(t *testing.T) {
 	idp.signInAs("patrick", "users", "admins")
 	b := newBrowser(t, "8.8.8.9")
 	p := b.get(s.base + "/")
-	mustContain(t, p, "Registers them in office for 1 day.", "Enter an address",
-		"office : one click keeps addresses for 1 day; you may also enter addresses, kept for up to 1 day.")
+	mustContain(t, p, "Registers them in office for 1 day.", "Enter an address", `<option value="1d" selected>1 day</option>`)
+	mustNotContain(t, p, "Registers them in office for 12 hours")
 	p = b.post(s.base+"/register", s.base, url.Values{})
 	mustContain(t, p, "Registered", "8.8.8.9/32 in office, until")
 	es := entries(t, "patrick")
@@ -282,8 +285,7 @@ func TestPrivateAddresses(t *testing.T) {
 	idp.signInAs("pia", "vpn-users", "lan")
 	b := newBrowser(t, "192.168.1.10")
 	p := b.get(s.base + "/")
-	mustContain(t, p, "192.168.1.10", `class="tag private-tag">private`,
-		"office : one click keeps addresses for 1 day; you may also enter addresses, kept for up to 1 day. Private addresses are accepted.")
+	mustContain(t, p, "192.168.1.10", `class="tag private-tag">private`)
 	p = b.post(s.base+"/register", s.base, url.Values{})
 	// vpn: refused by sso-web. office: sent on; the realm's seeded IP rules refuse it.
 	mustContain(t, p, "Nothing was registered", "192.168.1.10/32 in vpn: vpn does not accept private addresses.",

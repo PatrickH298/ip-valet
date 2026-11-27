@@ -174,8 +174,7 @@ dl.facts dd { margin: 0; }
 .flash ul.results li { margin: 0.15rem 0; }
 .flash ul.results li.ok::marker { content: "✓  "; }
 .flash ul.results li.bad::marker { content: "✗  "; }
-ul.plain { padding-left: 1.2rem; }
-ul.plain li { margin: 0.25rem 0; }
+.notice { white-space: pre-line; overflow-wrap: anywhere; margin-bottom: 1rem; }
 @media (max-width: 40rem) {
   .addr-row { grid-template-columns: 3rem minmax(0, 1fr); }
   .addr-row label.subnet { grid-column: 2; }

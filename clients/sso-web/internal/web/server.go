@@ -7,6 +7,7 @@ package web
 import (
 	"context"
 	"fmt"
+	"html/template"
 	"log/slog"
 	"net/http"
 	"net/netip"
@@ -35,6 +36,7 @@ type Options struct {
 
 	PublicURL          *url.URL
 	Title              string
+	Message            string // shown at the top of the page; "" = none
 	DetectV4, DetectV6 *url.URL
 
 	DefaultSubnetV4, DefaultSubnetV6 int
@@ -50,6 +52,7 @@ type Options struct {
 // Server serves the site.
 type Server struct {
 	Options
+	message      template.HTML // Message, escaped, with its links
 	pages        *templates
 	csp          string
 	warnedHeader atomic.Bool
@@ -60,7 +63,7 @@ const maxForm = 64 << 10
 
 // New parses the templates and returns a server.
 func New(o Options) (*Server, error) {
-	s := &Server{Options: o}
+	s := &Server{Options: o, message: renderMessage(o.Message)}
 	if s.Location == nil {
 		s.Location = time.UTC
 	}

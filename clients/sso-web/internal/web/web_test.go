@@ -11,6 +11,24 @@ import (
 	"github.com/PatrickH298/ip-valet/clients/sso-web/internal/rules"
 )
 
+func TestRenderMessage(t *testing.T) {
+	for in, want := range map[string]string{
+		"Welcome to ip-valet": "Welcome to ip-valet",
+		"<b>bold</b> & more":  "&lt;b&gt;bold&lt;/b&gt; &amp; more",
+		"Then go to https://intranet.example.com/start.": `Then go to <a href="https://intranet.example.com/start" rel="noopener noreferrer">` +
+			`https://intranet.example.com/start</a>.`,
+		"(see http://a.example/x?y=1&z=2)": `(see <a href="http://a.example/x?y=1&amp;z=2" rel="noopener noreferrer">` +
+			`http://a.example/x?y=1&amp;z=2</a>)`,
+		`https://x.example/"><script>`:        `<a href="https://x.example/" rel="noopener noreferrer">https://x.example/</a>&#34;&gt;&lt;script&gt;`,
+		"javascript:alert(1) and example.com": "javascript:alert(1) and example.com",
+		"https:// alone":                      "https:// alone",
+	} {
+		if got := string(renderMessage(in)); got != want {
+			t.Errorf("%q:\n got %s\nwant %s", in, got, want)
+		}
+	}
+}
+
 func TestSubnets(t *testing.T) {
 	if got := subnets(32, 28, 32); len(got) != 5 || got[0] != 32 || got[4] != 28 {
 		t.Fatal(got)

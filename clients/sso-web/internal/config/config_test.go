@@ -85,6 +85,29 @@ func TestSAMLAndDetection(t *testing.T) {
 	}
 }
 
+func TestMessage(t *testing.T) {
+	c, err := load(t, base(), nil)
+	if err != nil || c.Message != "" {
+		t.Fatalf("%q %v", c.Message, err)
+	}
+	env := base()
+	env["IPVALET_SSO_MESSAGE"] = "  Welcome to ip-valet  "
+	if c, err = load(t, env, nil); err != nil || c.Message != "Welcome to ip-valet" {
+		t.Fatalf("%q %v", c.Message, err)
+	}
+	env = base()
+	env["IPVALET_SSO_MESSAGE_FILE"] = "/message.txt"
+	if c, err = load(t, env, map[string]string{"/message.txt": "Welcome.\r\nThen go to https://intranet.example.com\n"}); err != nil ||
+		c.Message != "Welcome.\nThen go to https://intranet.example.com" {
+		t.Fatalf("%q %v", c.Message, err)
+	}
+	env = base()
+	env["IPVALET_SSO_MESSAGE"] = strings.Repeat("é", MaxMessage+1)
+	if _, err = load(t, env, nil); err == nil || !strings.Contains(err.Error(), "at most 4000 characters") {
+		t.Fatal(err)
+	}
+}
+
 func TestErrors(t *testing.T) {
 	cases := []struct {
 		set  map[string]string

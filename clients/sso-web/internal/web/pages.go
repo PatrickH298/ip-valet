@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/netip"
 	"slices"
@@ -137,14 +138,6 @@ type slot struct {
 	Default   int
 }
 
-type grantView struct {
-	Where       string
-	TTL         string
-	Manual      bool
-	ManualLimit string // how long typed-in addresses may be kept
-	Private     bool   // private addresses are accepted
-}
-
 type placeView struct {
 	ID         string // the entry, for live updates
 	Where      string
@@ -174,11 +167,11 @@ type manualView struct {
 
 type homeView struct {
 	User        string
-	AutoSummary string // where one click registers, and for how long
+	Message     template.HTML // the administrator's message, if any
+	AutoSummary string        // where one click registers, and for how long
 	Flash       *flash
 	V4, V6      slot
 	Token       string
-	Grants      []grantView
 	Manual      *manualView
 	Addresses   []addressView
 	ListError   string
@@ -186,7 +179,7 @@ type homeView struct {
 
 func (s *Server) home(w http.ResponseWriter, r *http.Request, sess Session, grants []rules.Grant) {
 	conn := httpx.ClientIPFrom(r.Context())
-	v := homeView{User: sess.User, Flash: s.Sessions.TakeFlash(sess.ID), Token: s.detectToken(sess)}
+	v := homeView{User: sess.User, Message: s.message, Flash: s.Sessions.TakeFlash(sess.ID), Token: s.detectToken(sess)}
 	v.V4 = slot{Family: "ipv4", Label: "IPv4", Field: "subnet_v4",
 		Subnets: subnets(32, s.MaxSubnetV4, s.DefaultSubnetV4), Default: s.DefaultSubnetV4}
 	v.V6 = slot{Family: "ipv6", Label: "IPv6", Field: "subnet_v6",
@@ -208,13 +201,6 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, sess Session, gran
 	var auto []string
 	for _, g := range grants {
 		auto = append(auto, "in "+where(g.Realm, g.Group)+" for "+g.TTL.Human())
-		gv := grantView{Where: where(g.Realm, g.Group), TTL: g.TTL.Human(), Manual: g.Manual, Private: g.Private}
-		if g.MaxTTL.Unlimited {
-			gv.ManualLimit = "with no time limit"
-		} else {
-			gv.ManualLimit = "for up to " + g.MaxTTL.Human()
-		}
-		v.Grants = append(v.Grants, gv)
 	}
 	v.AutoSummary = "Registers them " + joinAnd(auto) + "."
 	if manual := rules.Manual(grants); len(manual) > 0 {

@@ -339,6 +339,11 @@ services:
       # IPVALET_SSO_LISTEN_ADDR: ":8091"
       # The site's name, shown on its pages.
       # IPVALET_SSO_TITLE: ip-valet
+      # A message shown at the top of the page, such as a welcome or where to
+      # go once registered. Plain text, at most 4000 characters: line breaks
+      # are kept, and http:// and https:// links become clickable. A longer
+      # one can come from a file (IPVALET_SSO_MESSAGE_FILE). Empty: none.
+      # IPVALET_SSO_MESSAGE: "Once registered, go to https://intranet.example.com"
       # Subnet offered first for a detected address, as a prefix length.
       # IPVALET_SSO_DEFAULT_SUBNET_V4: "32"
       # IPVALET_SSO_DEFAULT_SUBNET_V6: "64"

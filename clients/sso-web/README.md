@@ -8,6 +8,10 @@ the realms' rules, workers and audit log apply as for any other client.
 
 Once signed in, a person sees:
 
+- **Your message**, if you set one (`IPVALET_SSO_MESSAGE`, or
+  `IPVALET_SSO_MESSAGE_FILE` for a longer one): a welcome, or where to go once
+  registered. It is plain text; line breaks are kept and `http://` and
+  `https://` links become clickable.
 - **Register this device**: their detected IPv4 and IPv6 addresses, a subnet
   for each (by default /32 and /64), and one button that registers them in
   every realm their rules allow.

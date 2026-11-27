@@ -7,6 +7,9 @@
 {{- end}}
 
 <h1>Your addresses</h1>
+{{- with .Message}}
+<div class="card notice">{{.}}</div>
+{{- end}}
 
 <section class="card">
   <h2>Register this device</h2>
@@ -80,14 +83,6 @@
   {{- end}}
 </section>
 
-<section>
-  <h2>Where your addresses go</h2>
-  <ul class="plain">
-    {{- range .Grants}}
-    <li><strong>{{.Where}}</strong>: one click keeps addresses for {{.TTL}}{{if .Manual}}; you may also enter addresses, kept {{.ManualLimit}}{{end}}{{if .Private}}. Private addresses are accepted{{end}}.</li>
-    {{- end}}
-  </ul>
-</section>
 <script src="/static/detect.js"></script>
 <script src="/static/status.js"></script>
 {{end}}
