@@ -56,7 +56,6 @@ func TestGrants(t *testing.T) {
 	rs := []Rule{
 		mustParse(t, "A", `group=a realm=realm-a max_ttl=8h`),
 		mustParse(t, "B", `group=b realm=realm-b max_ttl=30d ttl=7d manual=yes`),
-		mustParse(t, "B2", `group=b2 realm=realm-b as=b max_ttl=90d ttl=1d`),
 		mustParse(t, "BOSS", `user=boss realm=realm-a as=management max_ttl=unlimited manual=yes`),
 		mustParse(t, "ALL", `realm=lobby as=everyone max_ttl=1h`),
 	}
@@ -66,13 +65,6 @@ func TestGrants(t *testing.T) {
 		t.Fatalf("%+v", gs)
 	}
 	if gs[0].Group != "everyone" || gs[1].Group != "a" || gs[2].Group != "b" || !gs[2].Manual || gs[1].Manual {
-		t.Fatalf("%+v", gs)
-	}
-	// Two rules giving the same realm and API group merge: longest lifetimes.
-	gs = Grants(rs, Identity{User: "bea", Groups: []string{"b", "b2"}})
-	b := gs[1]
-	if len(gs) != 2 || b.Realm != "realm-b" || b.MaxTTL.String() != "90d" || b.TTL.String() != "7d" || !b.Manual ||
-		strings.Join(b.Rules, ",") != "B,B2" {
 		t.Fatalf("%+v", gs)
 	}
 	// A user rule applies without groups.
@@ -87,9 +79,54 @@ func TestGrants(t *testing.T) {
 		t.Fatal("manual entry granted without a manual rule")
 	}
 	// Without the any-group rule, someone who matches nothing gets nothing.
-	if gs := Grants(rs[:4], Identity{User: "eve", Groups: []string{"c"}}); len(gs) != 0 {
+	if gs := Grants(rs[:3], Identity{User: "eve", Groups: []string{"c"}}); len(gs) != 0 {
 		t.Fatalf("%+v", gs)
 	}
+}
+
+// Several rules for one realm give one grant: the most permissive wins.
+func TestGrantsSameRealm(t *testing.T) {
+	rs := []Rule{
+		mustParse(t, "ADMINS", `group=admins realm=office max_ttl=24h manual=yes`),
+		mustParse(t, "USERS", `group=users realm=office max_ttl=12h`),
+	}
+	want := func(gs []Grant, group, maxTTL, ttl string, manual bool, rules string) {
+		t.Helper()
+		if len(gs) != 1 {
+			t.Fatalf("%d grants: %+v", len(gs), gs)
+		}
+		g := gs[0]
+		if g.Realm != "office" || g.Group != group || g.MaxTTL.String() != maxTTL || g.TTL.String() != ttl ||
+			g.Manual != manual || strings.Join(g.Rules, ",") != rules {
+			t.Fatalf("%+v", g)
+		}
+	}
+	// patrick is in both: 24 hours, manual entry, entries in admins.
+	want(Grants(rs, Identity{User: "patrick", Groups: []string{"users", "admins"}}), "admins", "1d", "1d", true, "ADMINS,USERS")
+	// Only in users: that rule alone.
+	want(Grants(rs, Identity{User: "uma", Groups: []string{"users"}}), "users", "12h", "12h", false, "USERS")
+
+	// Each limit is the most permissive of all the rules, and the group is
+	// the one with the longest max_ttl, then manual entry, then ttl, then name.
+	rs = []Rule{
+		mustParse(t, "LONG", `group=long realm=office max_ttl=30d ttl=1d`),
+		mustParse(t, "MANUAL", `group=manual realm=office max_ttl=12h manual=yes`),
+		mustParse(t, "LONGTTL", `group=longttl realm=office max_ttl=7d ttl=7d`),
+	}
+	want(Grants(rs, Identity{User: "x", Groups: []string{"long", "manual", "longttl"}}), "long", "30d", "7d", true, "LONG,LONGTTL,MANUAL")
+	want(Grants(rs, Identity{User: "x", Groups: []string{"manual", "longttl"}}), "longttl", "7d", "7d", true, "LONGTTL,MANUAL")
+	rs = []Rule{
+		mustParse(t, "B", `group=b realm=office max_ttl=7d`),
+		mustParse(t, "A", `group=a realm=office max_ttl=7d manual=yes`),
+		mustParse(t, "C", `group=c realm=office max_ttl=7d manual=yes`),
+	}
+	want(Grants(rs, Identity{User: "x", Groups: []string{"a", "b", "c"}}), "a", "7d", "7d", true, "A,C,B")
+	// The same group from two rules merges as before.
+	rs = []Rule{
+		mustParse(t, "B", `group=b realm=office max_ttl=30d ttl=7d manual=yes`),
+		mustParse(t, "B2", `group=b2 realm=office as=b max_ttl=90d ttl=1d`),
+	}
+	want(Grants(rs, Identity{User: "bea", Groups: []string{"b", "b2"}}), "b", "90d", "7d", true, "B2,B")
 }
 
 func TestTTL(t *testing.T) {

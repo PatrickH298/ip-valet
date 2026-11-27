@@ -3,8 +3,9 @@
 // the realm their addresses go to, the group the entries carry in the API,
 // the longest lifetime allowed (max_ttl), the lifetime a one-click
 // registration asks for (ttl) and whether they may type in addresses
-// themselves (manual). A person gets a grant from every rule that takes
-// them; nobody else may sign in.
+// themselves (manual). A person gets one grant per realm that some rule
+// sends them to, the most permissive of those rules winning; someone no
+// rule takes may not sign in.
 package rules
 
 import (
@@ -41,7 +42,8 @@ type Identity struct {
 	Groups []string
 }
 
-// Grant is a realm and API group a person may register addresses in.
+// Grant is a realm a person may register addresses in, and the API group
+// the entries carry.
 type Grant struct {
 	Realm  string
 	Group  string // the group the entries carry in the API
@@ -50,9 +52,6 @@ type Grant struct {
 	Manual bool
 	Rules  []string // the rules that grant it
 }
-
-// Key identifies a grant: one realm and API group.
-func (g Grant) Key() string { return g.Realm + "\x00" + g.Group }
 
 // Matches reports whether r takes id, and the API group its entries carry.
 func (r Rule) Matches(id Identity) (string, bool) {
@@ -71,38 +70,53 @@ func (r Rule) Matches(id Identity) (string, bool) {
 	return r.Group, true
 }
 
-// Grants returns what id may do, merged per realm and API group: several
-// rules granting the same pair give the longest lifetimes, and manual entry
-// if any of them allows it. They are sorted by realm, then group.
+// Grants returns what id may do: one grant per realm. When several rules
+// send someone to the same realm, the most permissive wins: the longest
+// max_ttl and the longest ttl, and manual entry if any of them allows it.
+// The entries carry the group of the most permissive of those rules: the
+// one with the longest max_ttl, then one that allows manual entry, then the
+// longest ttl, then the first by name. Grants are sorted by realm.
 func Grants(rs []Rule, id Identity) []Grant {
-	byKey := map[string]*Grant{}
+	type match struct {
+		rule  Rule
+		group string
+	}
+	byRealm := map[string][]match{}
 	for _, r := range rs {
-		group, ok := r.Matches(id)
-		if !ok {
-			continue
+		if group, ok := r.Matches(id); ok {
+			byRealm[r.Realm] = append(byRealm[r.Realm], match{r, group})
 		}
-		g := Grant{Realm: r.Realm, Group: group}
-		cur := byKey[g.Key()]
-		if cur == nil {
-			g.MaxTTL, g.TTL, g.Manual, g.Rules = r.MaxTTL, r.TTL, r.Manual, []string{r.Name}
-			byKey[g.Key()] = &g
-			continue
-		}
-		cur.MaxTTL = Longest(cur.MaxTTL, r.MaxTTL)
-		cur.TTL = Longest(cur.TTL, r.TTL)
-		cur.Manual = cur.Manual || r.Manual
-		cur.Rules = append(cur.Rules, r.Name)
 	}
-	out := make([]Grant, 0, len(byKey))
-	for _, g := range byKey {
-		out = append(out, *g)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Realm != out[j].Realm {
-			return out[i].Realm < out[j].Realm
+	out := make([]Grant, 0, len(byRealm))
+	for realm, ms := range byRealm {
+		slices.SortStableFunc(ms, func(a, b match) int {
+			switch {
+			case Longer(a.rule.MaxTTL, b.rule.MaxTTL):
+				return -1
+			case Longer(b.rule.MaxTTL, a.rule.MaxTTL):
+				return 1
+			case a.rule.Manual != b.rule.Manual:
+				if a.rule.Manual {
+					return -1
+				}
+				return 1
+			case Longer(a.rule.TTL, b.rule.TTL):
+				return -1
+			case Longer(b.rule.TTL, a.rule.TTL):
+				return 1
+			}
+			return strings.Compare(a.rule.Name, b.rule.Name)
+		})
+		g := Grant{Realm: realm, Group: ms[0].group, MaxTTL: ms[0].rule.MaxTTL, TTL: ms[0].rule.TTL}
+		for _, m := range ms {
+			g.MaxTTL = Longest(g.MaxTTL, m.rule.MaxTTL)
+			g.TTL = Longest(g.TTL, m.rule.TTL)
+			g.Manual = g.Manual || m.rule.Manual
+			g.Rules = append(g.Rules, m.rule.Name)
 		}
-		return out[i].Group < out[j].Group
-	})
+		out = append(out, g)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Realm < out[j].Realm })
 	return out
 }
 

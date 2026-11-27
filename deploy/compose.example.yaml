@@ -297,7 +297,10 @@ services:
       # (at least one) Rules: IPVALET_SSO_RULE_<NAME>, each space-separated
       # key=value pairs. A rule takes people by IdP user and group and sends
       # their addresses to one realm; people get every rule that takes them,
-      # and someone no rule takes cannot sign in.
+      # and someone no rule takes cannot sign in. Rules that send someone to
+      # the same realm merge, and the most permissive wins: the longest
+      # max_ttl and ttl, manual entry if any allows it, and the group of the
+      # rule with the longest max_ttl.
       #   realm    the realm (required)
       #   user     an IdP user name, or * for any (default *)
       #   group    an IdP group, or * for any (default *)

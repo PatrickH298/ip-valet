@@ -27,15 +27,23 @@ browser ──HTTPS──> reverse proxy ──> sso-web (:8091) ──client ke
 ## Who may do what
 
 The IdP says who someone is: a user name and groups. Rules
-(`IPVALET_SSO_RULE_<NAME>`) turn that into **grants**, each a realm and API
-group with lifetimes and a manual-entry flag:
+(`IPVALET_SSO_RULE_<NAME>`) turn that into **grants**: one per realm, each with
+the API group its entries carry, lifetimes and a manual-entry flag:
 
 - A rule takes people by user (a name or `*`) and group (a name or `*`). Its
   entries carry the rule's group, or `as=` when it names one. A rule that
   matches any group, or a user alone, must say which group its entries carry,
   so a realm's API groups stay a small, predictable set.
-- A person gets every rule that takes them, merged per realm and API group:
-  the longest lifetimes win, and manual entry is allowed if any rule allows it.
+- A person gets every rule that takes them. Rules that send someone to the
+  same realm merge, and the most permissive wins:
+  - the longest `max_ttl` and `ttl`;
+  - manual entry if any rule allows it;
+  - the group of the rule with the longest `max_ttl` (on a tie: manual entry,
+    then the longest `ttl`, then the name).
+
+  Each address is registered once per realm, rather than once per matching
+  group, so a member of `users` (12 hours) and `admins` (24 hours, manual) gets
+  one office entry in `admins`, for 24 hours.
 - **No grant, no session.** Someone the IdP signs in but no rule takes is
   shown "No access", and the attempt is logged with their groups.
 - Only groups some rule names are kept, so a person in hundreds of IdP groups

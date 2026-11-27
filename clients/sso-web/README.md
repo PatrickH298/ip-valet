@@ -60,9 +60,27 @@ space-separated `key=value` pairs:
 
 A person gets every rule that takes them. Someone in groups `a` and `b`, with
 one rule sending `a` to realm A and another sending `b` to realm B, has each
-address registered in both realms. Two rules that send someone to the same
-realm and group merge: the longest lifetimes win, and manual entry is allowed
-if either allows it.
+address registered in both realms.
+
+Several rules that send someone to the **same realm** merge into one, and the
+most permissive wins:
+
+- **Lifetimes:** the longest `max_ttl` and the longest `ttl`.
+- **Manual entry:** allowed if any of them allows it.
+- **Group:** the entry carries the group of the most permissive rule. That is
+  the one with the longest `max_ttl`; on a tie, one that allows manual entry,
+  then the longest `ttl`, then the first by name.
+
+For example, patrick is in both `users` and `admins`:
+
+```bash
+IPVALET_SSO_RULE_USERS='group=users realm=office max_ttl=12h'
+IPVALET_SSO_RULE_ADMINS='group=admins realm=office max_ttl=24h manual=yes'
+```
+
+He gets 24 hours and manual entry in office, and his address is registered
+there once, in group `admins`. Someone in `users` alone gets 12 hours and no
+manual entry.
 
 ```bash
 IPVALET_SSO_RULE_STAFF='group=staff realm=office max_ttl=12h'
@@ -87,6 +105,8 @@ plain words:
 Each realm is submitted separately, so a limit in one never blocks another.
 
 ## Identity providers
+
+Step-by-step guide: [authentik over OpenID Connect](docs/authentik.md).
 
 **OpenID Connect.** Register a confidential client with the redirect URI
 `<IPVALET_SSO_PUBLIC_URL>/auth/callback`, and set:

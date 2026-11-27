@@ -227,3 +227,43 @@ func TestCrossSiteAndUntrustedProxies(t *testing.T) {
 	}
 	mustContain(t, p, "Request refused")
 }
+
+// Two rules for one realm: the most permissive wins, once.
+func TestSameRealmMostPermissive(t *testing.T) {
+	if env.skip != "" {
+		t.Skip(env.skip)
+	}
+	idp := newFakeOIDC(t)
+	s := startSite(t, with(idp.env(), map[string]string{
+		"IPVALET_SSO_RULE_USERS":  "group=users realm=office max_ttl=12h",
+		"IPVALET_SSO_RULE_ADMINS": "group=admins realm=office max_ttl=24h manual=yes",
+	}))
+	idp.signInAs("patrick", "users", "admins")
+	b := newBrowser(t, "8.8.8.9")
+	p := b.get(s.base + "/")
+	mustContain(t, p, "Registers them in office for 1 day.", "Enter an address",
+		"office : one click keeps addresses for 1 day; you may also enter addresses, kept for up to 1 day.")
+	p = b.post(s.base+"/register", s.base, url.Values{})
+	mustContain(t, p, "Registered", "8.8.8.9/32 in office, until")
+	es := entries(t, "patrick")
+	if len(es) != 1 || es[0]["group"] != "admins" {
+		t.Fatalf("want one entry in admins: %v", es)
+	}
+	exp, _ := time.Parse(time.RFC3339, es[0]["expires_at"].(string))
+	if left := time.Until(exp); left > 24*time.Hour || left < 23*time.Hour {
+		t.Fatalf("%s left", left)
+	}
+	p = b.post(s.base+"/register/manual", s.base, url.Values{"address": {"1.0.0.1"}, "ttl": {"1d"}})
+	mustContain(t, p, "1.0.0.1/32 in office, until")
+
+	// A member of users alone gets that rule: 12 hours, no manual entry.
+	idp.signInAs("uma", "users")
+	b = newBrowser(t, "8.8.8.10")
+	p = b.get(s.base + "/")
+	mustContain(t, p, "Registers them in office for 12 hours.")
+	mustNotContain(t, p, "Enter an address")
+	p = b.post(s.base+"/register/manual", s.base, url.Values{"address": {"1.0.0.2"}, "ttl": {"1h"}})
+	if p.status != http.StatusForbidden {
+		t.Fatalf("manual entry without a manual rule: %d", p.status)
+	}
+}
