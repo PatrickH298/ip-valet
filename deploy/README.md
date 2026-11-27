@@ -1,7 +1,7 @@
 # Deploying ip-valet
 
 [`compose.example.yaml`](compose.example.yaml) runs Postgres, the API server,
-the admin dashboard and the UniFi worker with Docker Compose. Every setting is an environment
+the admin dashboard, the UniFi worker and the SSO web client with Docker Compose. Every setting is an environment
 variable, set or listed (commented out, with its default and a definition) in
 the file itself. Settings marked *secret* can come from files instead, such as
 Docker secrets; the file shows that setup commented out.
@@ -12,6 +12,8 @@ Docker secrets; the file shows that setup commented out.
 | 8081 | `api` | Admin API (`/v1/admin/*`), `/healthz`, `/readyz` |
 | 9090 | `api` | Prometheus `/metrics` (not published in the example) |
 | 8090 | `dashboard` | Admin dashboard |
+| 8091 | `sso-web` | The registration website, and `/detect` |
+| 8092 | `sso-web` | Address detection alone, with `IPVALET_SSO_DETECT_LISTEN_ADDR` (not published in the example) |
 
 The UniFi worker (`unifi`) serves nothing; it connects out to the API and to
 your UniFi console.
@@ -88,10 +90,34 @@ you.
       lists that do not exist yet and replaces the contents of every list a rule
       names, but never changes policies.
 
+7. **Set up the SSO web client** (skip this if people register some other way):
+   1. In the dashboard, create a client bound to the realms people should
+      register in, and a key on its page. Every realm needs a worker
+      subscribed to it, or registrations there are refused.
+   2. Register the site at your identity provider: with OpenID Connect, the
+      redirect URI `<IPVALET_SSO_PUBLIC_URL>/auth/callback`; with SAML, the
+      metadata at `<IPVALET_SSO_PUBLIC_URL>/saml/metadata`. Have it send the
+      user's groups.
+   3. In `compose.yaml`, set `IPVALET_SSO_PUBLIC_URL`, `IPVALET_SSO_API_KEY`,
+      the provider's settings and the rules (`IPVALET_SSO_RULE_<NAME>`), and
+      `IPVALET_SSO_TRUSTED_PROXIES` to your reverse proxy's address. The
+      [client's README](../clients/sso-web/README.md) explains the rules and
+      the detection hosts for the other address family.
+   4. Check it, then start it:
+
+      ```bash
+      docker compose run --rm sso-web check
+      ```
+
+      ```bash
+      docker compose up -d sso-web
+      ```
+
 ## Using secrets instead of environment variables
 
 Any setting marked *secret* in the example (the database URL, the admin key,
-the dashboard's API key, the UniFi worker's two keys and the Postgres password)
+the dashboard's API key, the UniFi worker's two keys, sso-web's key and OpenID
+Connect client secret, and the Postgres password)
 can be read from a file by adding `_FILE` to its name. With Docker secrets:
 
 1. Write each value to a file under `secrets/`:
@@ -109,7 +135,7 @@ can be read from a file by adding `_FILE` to its name. With Docker secrets:
    ```
 
 2. Make each file readable by the user its service runs as: 65532 for the API,
-   the dashboard and the UniFi worker (or the uid in their `user:` lines; see
+   the dashboard, the UniFi worker and sso-web (or the uid in their `user:` lines; see
    [Running as another user](#running-as-another-user)), 999 for Postgres.
    With the default users:
 
@@ -123,8 +149,8 @@ can be read from a file by adding `_FILE` to its name. With Docker secrets:
 
 ## Running as another user
 
-The API, the dashboard and the UniFi worker run as uid and gid 65532 unless
-you choose another user. To choose one, uncomment the service's `user:` line
+The API, the dashboard, the UniFi worker and sso-web run as uid and gid
+65532 unless you choose another user. To choose one, uncomment the service's `user:` line
 and set both numbers, for example `user: "1000:1000"`. The container still
 runs without root, without Linux capabilities and on a read-only filesystem.
 
@@ -164,6 +190,12 @@ throttle. By default (`IPVALET_TRUSTED_PROXIES` and
 them to your reverse proxy's address or subnet to believe the header only
 from it, or to `none` to always use the connection's own address.
 
+**sso-web is different:** the address it detects is what people register
+with one click, so trusting every peer lets anyone who reaches the container
+directly register any address. The example warns beside
+`IPVALET_SSO_TRUSTED_PROXIES`, and sso-web logs a warning while it is unset;
+set it to your proxy's address or subnet, or to `none`.
+
 The dashboard marks its session cookie `Secure` when the browser reached it
 over HTTPS, directly or through a proxy that sends `X-Forwarded-Proto`
 (`IPVALET_DASHBOARD_SECURE_COOKIES=auto`, the default). Set it to `true` or
@@ -184,8 +216,8 @@ over HTTPS, directly or through a proxy that sends `X-Forwarded-Proto`
 - **Backups.** Back up the `db-data` volume, or run `pg_dump` regularly. It
   holds every entry and key. Workers remove expired addresses on their own, so
   a database outage does not leave expired access in place.
-- **Container settings.** The example runs the API, the dashboard and the
-  UniFi worker with a read-only filesystem (the dashboard and the worker write
+- **Container settings.** The example runs the API, the dashboard, the
+  UniFi worker and sso-web with a read-only filesystem (the dashboard and the worker write
   only to their `/data` volumes), no Linux capabilities and
   `no-new-privileges`. The images run as uid 65532; see
   [Running as another user](#running-as-another-user) to change it.

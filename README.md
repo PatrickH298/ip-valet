@@ -7,4 +7,5 @@ Simple IP registration service.
 - [API server](api/README.md): configuration, commands and development
 - [Admin dashboard](dashboard/README.md), and its [design](docs/dashboard.md)
 - [UniFi worker](workers/unifi/README.md): keeps UniFi traffic matching lists in line with registered addresses
+- [SSO web client](clients/sso-web/README.md): people sign in with OpenID Connect or SAML and register their addresses; its [design](docs/sso-web.md)
 - [Deployment](deploy/README.md): a hardened Compose setup
