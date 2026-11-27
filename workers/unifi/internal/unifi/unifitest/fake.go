@@ -27,6 +27,7 @@ type Server struct {
 
 	mu        sync.Mutex
 	lists     map[string]*unifi.List
+	others    map[string]map[string]any // lists in their raw form, such as port lists
 	nextID    int
 	failPuts  int // fail this many PUTs with 500
 	Puts      int
@@ -35,7 +36,7 @@ type Server struct {
 
 // New starts a fake controller that accepts key.
 func New(key string) *Server {
-	s := &Server{Key: key, lists: map[string]*unifi.List{}}
+	s := &Server{Key: key, lists: map[string]*unifi.List{}, others: map[string]map[string]any{}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/info", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"applicationVersion": "10.6.106"})
@@ -93,7 +94,12 @@ func (s *Server) listAll(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	var items []any
 	for i := 1; i <= s.nextID; i++ {
-		l, ok := s.lists[fmt.Sprintf("%08d-0000-4000-8000-000000000000", i)]
+		id := fmt.Sprintf("%08d-0000-4000-8000-000000000000", i)
+		if o, ok := s.others[id]; ok {
+			items = append(items, o)
+			continue
+		}
+		l, ok := s.lists[id]
 		if !ok {
 			continue
 		}
@@ -112,6 +118,10 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if o, ok := s.others[r.PathValue("id")]; ok {
+		writeJSON(w, 200, o)
+		return
+	}
 	l, ok := s.lists[r.PathValue("id")]
 	if !ok {
 		writeJSON(w, 404, map[string]any{"message": "not found"})
@@ -218,6 +228,26 @@ func (s *Server) Add(name, typ string, items ...unifi.Item) string {
 	s.nextID++
 	id := fmt.Sprintf("%08d-0000-4000-8000-000000000000", s.nextID)
 	s.lists[id] = &unifi.List{ID: id, Name: name, Type: typ, Items: items}
+	return id
+}
+
+// AddPorts adds a port list as the real controller holds one: its item
+// values are numbers, not strings. Ports are single ports, or [start, stop]
+// ranges.
+func (s *Server) AddPorts(name string, ports ...[]int) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nextID++
+	id := fmt.Sprintf("%08d-0000-4000-8000-000000000000", s.nextID)
+	var items []any
+	for _, p := range ports {
+		if len(p) == 2 {
+			items = append(items, map[string]any{"type": "PORT_NUMBER_RANGE", "start": p[0], "stop": p[1]})
+		} else {
+			items = append(items, map[string]any{"type": "PORT_NUMBER", "value": p[0]})
+		}
+	}
+	s.others[id] = map[string]any{"id": id, "name": name, "type": "PORTS", "items": items}
 	return id
 }
 

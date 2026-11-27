@@ -209,6 +209,7 @@ func TestWorkerAgainstTheAPI(t *testing.T) {
 	guest := submit(t, ckey, realm, "bob", "guests", "1.1.1.1")
 
 	ctl := unifitest.New("unifi-key")
+	ctl.AddPorts("Web ports", []int{443}, []int{8000, 8080}) // real controllers hold these too
 	defer ctl.Close()
 	apiURL, _ := url.Parse(env.apiPublic)
 	ctlURL, _ := url.Parse(ctl.URL)

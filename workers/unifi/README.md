@@ -173,7 +173,9 @@ IPVALET_TEST_DATABASE_URL='postgres://postgres@localhost:5432/postgres?sslmode=d
 
 The unit tests run against a fake UniFi controller (`internal/unifi/unifitest`)
 that enforces what the real one does: the API key, at least one item per list,
-and a single address sent without a prefix length. The end-to-end tests build
+and a single address sent without a prefix length. It also holds a port list
+the way the real one does, with numbers for values, since the worker reads
+every list on the site. The end-to-end tests build
 the API server from `../../api`, run it against Postgres, and drive the worker
 against it. Without `IPVALET_TEST_DATABASE_URL` they are skipped; in CI they
 fail instead.
