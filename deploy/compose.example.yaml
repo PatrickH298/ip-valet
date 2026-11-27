@@ -1,5 +1,6 @@
 # Example deployment of ip-valet: Postgres, the API server, the admin
-# dashboard and the UniFi worker. See deploy/README.md for the first start.
+# dashboard, the UniFi worker and the SSO web client. See deploy/README.md for
+# the first start.
 #
 # Every setting is an environment variable. The required ones are set below;
 # every optional one is listed commented out, with its default and what it
@@ -235,6 +236,136 @@ services:
       # The cached desired state.
       - unifi-data:/data
 
+  sso-web:
+    image: ghcr.io/patrickh298/ip-valet-sso-web:main # built from main; pin a release tag once there is one
+    restart: unless-stopped
+    depends_on: [api]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    # The user the site runs as, as uid:gid; set both numbers. Default: the
+    # image's non-root user, 65532:65532. The site writes no files.
+    # user: "65532:65532"
+    environment:
+      # (required) Where people reach this site. The IdP sends them back here.
+      IPVALET_SSO_PUBLIC_URL: https://ip.example.com
+      # (required) URL of the ip-valet API's main listener (client and worker API).
+      IPVALET_SSO_API_URL: http://api:8080
+      # (required, secret) A client key. Create a client in the dashboard
+      # (Clients) bound to every realm the rules below name, create a key on
+      # its page and paste it here; the site does not start without it.
+      IPVALET_SSO_API_KEY: ""
+      # IPVALET_SSO_API_KEY_FILE: /run/secrets/sso_web_key
+      # (required) How people sign in: oidc (OpenID Connect) or saml.
+      IPVALET_SSO_PROVIDER: oidc
+
+      # -- OpenID Connect. Register a client at the IdP with the redirect URI
+      # <IPVALET_SSO_PUBLIC_URL>/auth/callback.
+      # (required) The IdP's issuer URL, exactly as the IdP writes it.
+      IPVALET_SSO_OIDC_ISSUER: https://auth.example.com/application/o/ip-valet/
+      # (required) The client id registered at the IdP.
+      IPVALET_SSO_OIDC_CLIENT_ID: ip-valet
+      # (secret) The client secret. Leave it empty for a public client (PKCE only).
+      IPVALET_SSO_OIDC_CLIENT_SECRET: ""
+      # IPVALET_SSO_OIDC_CLIENT_SECRET_FILE: /run/secrets/sso_web_oidc_secret
+      # Scopes requested. Many IdPs send the groups claim only for "groups".
+      # IPVALET_SSO_OIDC_SCOPES: openid profile email groups
+      # Claim holding the user name. A dotted name reaches into nested claims.
+      # IPVALET_SSO_OIDC_USERNAME_CLAIM: preferred_username
+      # Claim holding the groups, from the ID token or else userinfo (for
+      # example realm_access.roles for Keycloak realm roles).
+      # IPVALET_SSO_OIDC_GROUPS_CLAIM: groups
+
+      # -- SAML (IPVALET_SSO_PROVIDER: saml). Give the IdP this site's
+      # metadata, at <IPVALET_SSO_PUBLIC_URL>/saml/metadata; responses are
+      # posted to <IPVALET_SSO_PUBLIC_URL>/saml/acs.
+      # (required, one of the two) The IdP's metadata, by URL or as a file.
+      # IPVALET_SSO_SAML_IDP_METADATA_URL: https://auth.example.com/saml/metadata
+      # IPVALET_SSO_SAML_IDP_METADATA_FILE: /run/secrets/sso_web_idp_metadata
+      # This site's entity id. Default: <IPVALET_SSO_PUBLIC_URL>/saml/metadata.
+      # IPVALET_SSO_SAML_ENTITY_ID: ""
+      # Attribute holding the user name. Empty uses the subject's NameID.
+      # IPVALET_SSO_SAML_USERNAME_ATTRIBUTE: ""
+      # Attribute holding the groups, by Name or FriendlyName.
+      # IPVALET_SSO_SAML_GROUPS_ATTRIBUTE: groups
+      # (secret) A key pair for this site, PEM, to sign its requests and to
+      # receive encrypted assertions. Without it requests are unsigned and
+      # assertions must not be encrypted.
+      # IPVALET_SSO_SAML_SP_KEY_FILE: /run/secrets/sso_web_saml_key
+      # IPVALET_SSO_SAML_SP_CERT_FILE: /run/secrets/sso_web_saml_cert
+
+      # (at least one) Rules: IPVALET_SSO_RULE_<NAME>, each space-separated
+      # key=value pairs. A rule takes people by IdP user and group and sends
+      # their addresses to one realm; people get every rule that takes them,
+      # and someone no rule takes cannot sign in. Rules that send someone to
+      # the same realm merge, and the most permissive wins: the longest
+      # max_ttl and ttl, manual entry if any allows it, and the group of the
+      # rule with the longest max_ttl.
+      #   realm    the realm (required)
+      #   user     an IdP user name, or * for any (default *)
+      #   group    an IdP group, or * for any (default *)
+      #   as       the group the entries carry in ip-valet (default: group;
+      #            required when group is *)
+      #   max_ttl  the longest a person may keep an address, or unlimited (required)
+      #   ttl      how long one click keeps it (default: max_ttl)
+      #   manual   yes lets people type in addresses as well (default no)
+      # Quote a value with spaces: group="IT Staff".
+      IPVALET_SSO_RULE_STAFF: group=staff realm=default max_ttl=12h
+      # IPVALET_SSO_RULE_ADMINS: group=admins realm=default max_ttl=30d ttl=7d manual=yes
+
+      # ---- Optional; the values shown are the defaults ----
+      # Peers whose X-Forwarded-For and X-Forwarded-Proto headers are believed:
+      # * (every peer), none, or a comma-separated list of IPs and CIDR prefixes.
+      # WARNING: the address the site detects is what people register by one
+      # click. While every peer is trusted, anyone who can reach this container
+      # without going through your proxy can send X-Forwarded-For and register
+      # any address, even without manual entry. Set your reverse proxy's
+      # address or subnet, or none when there is no proxy. The site logs a
+      # warning at start while this is unset.
+      # IPVALET_SSO_TRUSTED_PROXIES: "*"
+      # Hosts reachable over one address family only (a name with only an A
+      # record, and one with only an AAAA record), sent by your proxy to this
+      # site's /detect, or to IPVALET_SSO_DETECT_LISTEN_ADDR. The page asks them
+      # for the address of the family its own connection did not use. Without
+      # them, only the address of each person's own connection is detected.
+      # IPVALET_SSO_DETECT_V4_URL: https://v4.ip.example.com/detect
+      # IPVALET_SSO_DETECT_V6_URL: https://v6.ip.example.com/detect
+      # A second listener that serves only address detection. Empty: none.
+      # IPVALET_SSO_DETECT_LISTEN_ADDR: ":8092"
+      # Address the site listens on (plain HTTP).
+      # IPVALET_SSO_LISTEN_ADDR: ":8091"
+      # The site's name, shown on its pages.
+      # IPVALET_SSO_TITLE: ip-valet
+      # Subnet offered first for a detected address, as a prefix length.
+      # IPVALET_SSO_DEFAULT_SUBNET_V4: "32"
+      # IPVALET_SSO_DEFAULT_SUBNET_V6: "64"
+      # Widest subnet a person may register, as a prefix length: 24 allows /24
+      # to /32. The realms' own prefix rules apply as well.
+      # IPVALET_SSO_MAX_SUBNET_V4: "24"
+      # IPVALET_SSO_MAX_SUBNET_V6: "48"
+      # When session cookies are marked Secure: auto (when the browser reached
+      # the site over HTTPS), true (always) or false (never).
+      # IPVALET_SSO_SECURE_COOKIES: auto
+      # Idle time that ends a session; the next visit signs in again.
+      # IPVALET_SSO_SESSION_IDLE: 1h
+      # Longest a session lasts.
+      # IPVALET_SSO_SESSION_MAX: 12h
+      # Where Sign out sends people, such as the IdP's own logout page.
+      # Empty: a signed-out page.
+      # IPVALET_SSO_LOGOUT_URL: ""
+      # Timeout for each call to the API server.
+      # IPVALET_SSO_API_TIMEOUT: 10s
+      # IANA time zone for the times pages show.
+      # IPVALET_SSO_TIMEZONE: UTC
+      # How long shutdown waits for requests in flight.
+      # IPVALET_SSO_SHUTDOWN_TIMEOUT: 15s
+      # Log level: debug, info, warn or error.
+      # IPVALET_SSO_LOG_LEVEL: info
+    # secrets: [sso_web_key, sso_web_oidc_secret]
+    ports:
+      - "8091:8091" # the site
+      # - "8092:8092" # address detection, with IPVALET_SSO_DETECT_LISTEN_ADDR
+
     # To also join a network that already exists, such as one shared with a
     # reverse proxy or another stack, list it on each service that needs it:
     # networks: [default, shared]
@@ -250,8 +381,9 @@ volumes:
 
 # Secrets, for the *_FILE variables above. Each file holds one value; the
 # containers read them as /run/secrets/<name>, so each file must be readable
-# by the user its service runs as: uid 65532 for the API, the dashboard and
-# the UniFi worker (or the uid in their user: lines) and uid 999 for Postgres.
+# by the user its service runs as: uid 65532 for the API, the dashboard, the
+# UniFi worker and sso-web (or the uid in their user: lines) and uid 999 for
+# Postgres.
 #
 # secrets:
 #   postgres_password:
@@ -266,3 +398,7 @@ volumes:
 #     file: ./secrets/unifi_worker_key
 #   unifi_controller_key:
 #     file: ./secrets/unifi_controller_key
+#   sso_web_key:
+#     file: ./secrets/sso_web_key
+#   sso_web_oidc_secret:
+#     file: ./secrets/sso_web_oidc_secret

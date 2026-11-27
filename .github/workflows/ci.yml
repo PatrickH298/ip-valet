@@ -3,11 +3,11 @@
 # the main branch ruleset should require (a required check that never runs
 # would block merging).
 #
-# Components: api/, dashboard/ and workers/unifi/, each a Go module with its
-# own image (ghcr.io/<owner>/ip-valet-api, -dashboard, -unifi) and release
-# tags (<directory>/vX.Y.Z, for example workers/unifi/v0.1.0). The dashboard's
-# and the worker's tests run against the API server built from api/, so an
-# API change tests them too.
+# Components: api/, dashboard/, workers/unifi/ and clients/sso-web/, each a Go
+# module with its own image (ghcr.io/<owner>/ip-valet-api, -dashboard, -unifi,
+# -sso-web) and release tags (<directory>/vX.Y.Z, for example
+# workers/unifi/v0.1.0). The other components' tests run against the API
+# server built from api/, so an API change tests them too.
 #
 # Images: built on every pull request (not pushed), pushed to GHCR on every
 # push to main, on release tags and weekly, so images pick up base-image
@@ -23,7 +23,7 @@ on:
   pull_request:
   push:
     branches: [main]
-    tags: ["api/v*", "dashboard/v*", "workers/unifi/v*"]
+    tags: ["api/v*", "dashboard/v*", "workers/unifi/v*", "clients/sso-web/v*"]
   schedule:
     - cron: "23 3 * * 1" # Mondays 03:23 UTC
   workflow_dispatch:
@@ -63,13 +63,15 @@ jobs:
           set -euo pipefail
           all='[{"name":"api","dir":"api","image":"ip-valet-api"},
                 {"name":"dashboard","dir":"dashboard","image":"ip-valet-dashboard"},
-                {"name":"unifi","dir":"workers/unifi","image":"ip-valet-unifi"}]'
+                {"name":"unifi","dir":"workers/unifi","image":"ip-valet-unifi"},
+                {"name":"sso-web","dir":"clients/sso-web","image":"ip-valet-sso-web"}]'
           # pick NAME... prints the components with those names, as JSON.
           pick() { jq -nc --argjson all "$all" '$all | map(select(.name as $n | $ARGS.positional | index($n)))' --args "$@"; }
           case "$REF" in
             refs/tags/api/v*) echo "components=$(pick api)" >> "$GITHUB_OUTPUT"; exit 0 ;;
             refs/tags/dashboard/v*) echo "components=$(pick dashboard)" >> "$GITHUB_OUTPUT"; exit 0 ;;
             refs/tags/workers/unifi/v*) echo "components=$(pick unifi)" >> "$GITHUB_OUTPUT"; exit 0 ;;
+            refs/tags/clients/sso-web/v*) echo "components=$(pick sso-web)" >> "$GITHUB_OUTPUT"; exit 0 ;;
           esac
           range=""
           case "$EVENT" in
@@ -84,7 +86,7 @@ jobs:
           esac
           if [ -z "$range" ]; then
             echo "Event $EVENT on $REF: checking every component."
-            echo "components=$(pick api dashboard unifi)" >> "$GITHUB_OUTPUT"
+            echo "components=$(pick api dashboard unifi sso-web)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           files="$(git diff --name-only "$range")"
@@ -93,6 +95,7 @@ jobs:
           if grep -qE '^(api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(api); fi
           if grep -qE '^(dashboard/|api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(dashboard); fi
           if grep -qE '^(workers/unifi/|api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(unifi); fi
+          if grep -qE '^(clients/sso-web/|api/|spec/|\.github/workflows/)' <<<"$files"; then names+=(sso-web); fi
           json="$(pick "${names[@]}")"
           echo "Components to check: $json"
           echo "components=$json" >> "$GITHUB_OUTPUT"
@@ -162,7 +165,7 @@ jobs:
       - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: ${{ matrix.component.dir }}/go.mod
-          # The dashboard's and the worker's tests build the API server too.
+          # The other components' tests build the API server too.
           cache-dependency-path: |
             ${{ matrix.component.dir }}/go.sum
             api/go.sum

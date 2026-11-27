@@ -1,0 +1,91 @@
+{{define "content"}}
+{{- with .Flash}}
+<div class="flash flash-{{.Kind}}" role="status">
+  <p><strong>{{.Title}}</strong></p>
+  <ul class="results">{{range .Lines}}<li class="{{if .OK}}ok{{else}}bad{{end}}">{{.Text}}</li>{{end}}</ul>
+</div>
+{{- end}}
+
+<h1>Your addresses</h1>
+
+<section class="card">
+  <h2>Register this device</h2>
+  <form method="post" action="/register" id="register" data-detect-token="{{.Token}}">
+    <div class="addresses">
+      {{- range $s := list .V4 .V6}}
+      <div class="addr-row" data-family="{{$s.Family}}"{{if $s.DetectURL}} data-detect-url="{{$s.DetectURL}}"{{end}}>
+        <span class="family">{{$s.Label}}</span>
+        <code class="addr">{{if $s.Addr}}{{$s.Addr}}{{else}}Not detected{{end}}</code>
+        <label class="subnet">Subnet
+          <select name="{{$s.Field}}"{{if not $s.Addr}} disabled{{end}}>
+            {{- range $s.Subnets}}<option value="{{.}}"{{if eq . $s.Default}} selected{{end}}>/{{.}}</option>{{end}}
+          </select>
+        </label>
+      </div>
+      {{- end}}
+    </div>
+    <p class="muted">{{.AutoSummary}}</p>
+    <button>Register my addresses</button>
+  </form>
+</section>
+
+{{- with .Manual}}
+<section class="card">
+  <h2>Enter an address</h2>
+  <form method="post" action="/register/manual" class="inline-form">
+    <label class="grow">Address or subnet
+      <input name="address" required autocomplete="off" spellcheck="false"
+        placeholder="203.0.113.7 or 2001:db8::/{{.DefaultV6}}">
+      <small>Without a /length: /{{.DefaultV4}} for IPv4 and /{{.DefaultV6}} for IPv6. At most /{{.MaxV4}} (IPv4) and /{{.MaxV6}} (IPv6).</small>
+    </label>
+    <label>Keep for
+      <select name="ttl">
+        {{- range .TTLs}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>{{end}}
+      </select>
+    </label>
+    <button>Register</button>
+  </form>
+  <p class="muted">Goes to {{.Where}}.</p>
+</section>
+{{- end}}
+
+<section>
+  <h2>Registered addresses</h2>
+  {{- if .ListError}}
+  <p class="err">{{.ListError}}</p>
+  {{- else if not .Addresses}}
+  <p class="muted">You have no registered addresses.</p>
+  {{- else}}
+  <ul class="registrations">
+    {{- range .Addresses}}
+    <li class="registration">
+      <div class="reg-head">
+        <code>{{.Prefix}}</code>
+        <form method="post" action="/revoke"><input type="hidden" name="prefix" value="{{.Prefix}}"><button class="danger small">Revoke</button></form>
+      </div>
+      <ul class="places">
+        {{- range .Places}}
+        <li>
+          <strong>{{.Where}}</strong>
+          <span class="badge state-{{.State}}">{{.StateLabel}}</span>
+          <span class="muted">{{.Expires}}</span>
+          {{- if .Detail}}<small class="muted">{{.Detail}}</small>{{end}}
+        </li>
+        {{- end}}
+      </ul>
+    </li>
+    {{- end}}
+  </ul>
+  {{- end}}
+</section>
+
+<section>
+  <h2>Where your addresses go</h2>
+  <ul class="plain">
+    {{- range .Grants}}
+    <li><strong>{{.Where}}</strong>: one click keeps addresses for {{.TTL}}{{if .Manual}}; you may also enter addresses, kept {{.ManualLimit}}{{end}}.</li>
+    {{- end}}
+  </ul>
+</section>
+<script src="/static/detect.js"></script>
+{{end}}

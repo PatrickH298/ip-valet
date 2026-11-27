@@ -11,7 +11,7 @@ ip-valet keeps firewall allow-lists in sync with addresses that people register,
 | Database (Postgres) | Source of truth for all configuration, entries and state | API server only |
 | API server (Go) | The only component with database access; validates, authorises, routes entries to workers, computes desired state and applied state | Database; accepts connections from clients and workers |
 | Worker | Subscribes, through an admin, to the entries it should apply; applies them somewhere (a UniFi firewall is the first worker type) and reports back what it applied | API server, outbound only; whatever it applies entries to |
-| Client | Submits entries on behalf of users (the registration website is the first client) | API server, outbound only |
+| Client | Submits entries on behalf of users (the registration website, sso-web, is the first client) | API server, outbound only |
 
 ```
   client ──────▶ API server ◀────── worker ──────▶ firewall
@@ -322,7 +322,7 @@ The API server is written in Go: `net/http` (method-and-path routing, SSE), `net
 | Migrations | Versioned SQL files (goose) run at startup inside a transaction, under a Postgres advisory lock so two instances cannot run them at once. |
 | Retention | Expired and removed entries are purged after 90 days, the audit log after 1 year; both configurable. The purge job takes an advisory lock. |
 | Health | `/healthz` reports the process is up; `/readyz` that the database is reachable (checked at most once a second) and the `LISTEN` connection is up. |
-| Deployment | `deploy/compose.example.yaml`: Postgres, the API and the dashboard on one network, configured by environment variables (secrets optional), the API and dashboard with a read-only filesystem, no capabilities and `no-new-privileges`. The API creates its database on first start. |
+| Deployment | `deploy/compose.example.yaml`: Postgres, the API, the dashboard, the UniFi worker and sso-web on one network, configured by environment variables (secrets optional), the API and dashboard with a read-only filesystem, no capabilities and `no-new-privileges`. The API creates its database on first start. |
 | Dependencies | Weekly update pull requests (Dependabot for now, Renovate later); govulncheck in every CI run, including the weekly one. |
 | Metrics | Prometheus, on a separate port: submissions by result code, per-worker `last_seen_at`, per-worker revision lag (current revision minus `applied_revision`), connected workers. External monitoring alerts when a worker falls behind or goes quiet. |
 | Configuration | Environment variables only, with built-in defaults (for example `IPVALET_DEFAULT_TTL=30d`); secrets also accept `_FILE` variants, so Docker secrets work but are never required. |
@@ -347,7 +347,8 @@ ip-valet/
 ├── docs/
 │   ├── design.md              # this document
 │   ├── api-server-spec.md     # implementation spec for the API server
-│   └── dashboard.md           # design of the admin dashboard
+│   ├── dashboard.md           # design of the admin dashboard
+│   └── sso-web.md             # design of the SSO registration website
 ├── api/                       # Go module, own Dockerfile and version
 │   ├── cmd/ipvalet-api/
 │   ├── internal/
@@ -356,7 +357,7 @@ ip-valet/
 ├── workers/
 │   └── unifi/                 # language chosen per worker
 ├── clients/
-│   └── web/                   # language chosen per client
+│   └── sso-web/               # registration website with OpenID Connect or SAML sign-in; language chosen per client
 ├── deploy/                    # compose example and setup notes
 └── .github/workflows/
 ```
@@ -395,8 +396,12 @@ Questions that were open in the first draft, and how they were settled.
 
 See [the UniFi worker's README](../workers/unifi/README.md).
 
-**Deferred to each client**
+**Decided per client**
 
-- Web client: authentik forward auth, the IPv4 and IPv6 detection hostnames, and widening a detected IPv6 address to /64.
+- sso-web: sign-in with OpenID Connect or SAML (not forward auth). Rules map IdP users and groups to realms, lifetimes and manual entry, and a person no rule takes cannot sign in.
+- sso-web: the other family's address comes from IPv4-only and IPv6-only detection hosts, proxied to the site's `/detect` or its own port; detected addresses are proven server-side, never taken from the browser.
+- sso-web: a detected IPv6 address is offered as its /64 by default; the widest subnet per family is configurable.
+
+See [sso-web.md](sso-web.md).
 - Which clients ship in the first release (the web client first; a Discord client later).
 - Whether a client uses the events stream or polls for applied state.

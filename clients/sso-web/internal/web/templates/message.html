@@ -1,0 +1,9 @@
+{{define "content"}}
+<section class="narrow">
+  <h1>{{.Heading}}</h1>
+  <p>{{.Message}}</p>
+  {{- if .Link}}
+  <p><a href="{{.LinkTo}}">{{.Link}}</a></p>
+  {{- end}}
+</section>
+{{end}}
