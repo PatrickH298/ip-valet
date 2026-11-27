@@ -81,10 +81,17 @@ type Error struct {
 }
 
 func (e *Error) Error() string {
-	if e.Status == 0 {
-		return fmt.Sprintf("UniFi %s %s: %v", e.Method, e.Path, e.Err)
+	msg := "UniFi " + e.Method + " " + e.Path
+	if e.Status != 0 {
+		msg += fmt.Sprintf(": %d %s", e.Status, http.StatusText(e.Status))
+		if e.Body != "" {
+			msg += ": " + e.Body
+		}
 	}
-	return fmt.Sprintf("UniFi %s %s: %d %s", e.Method, e.Path, e.Status, e.Body)
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
 }
 
 func (e *Error) Unwrap() error { return e.Err }
@@ -218,12 +225,42 @@ func (c *Client) ResolveSite(ctx context.Context, idOrName string) (Site, error)
 	return Site{}, fmt.Errorf("no UniFi site has the id or name %q (sites: %s)", idOrName, strings.Join(names, ", "))
 }
 
-// Item is one traffic matching list item.
+// Item is one traffic matching list item. The worker writes only address
+// lists, whose values are strings, but reads every list on the site: port
+// lists hold numbers (PORT_NUMBER value, PORT_NUMBER_RANGE start and stop),
+// so reading takes a string, a number or any other JSON value as text.
 type Item struct {
 	Type  string `json:"type"`
 	Value string `json:"value,omitempty"`
-	Start string `json:"start,omitempty"` // IP_ADDRESS_RANGE
+	Start string `json:"start,omitempty"` // IP_ADDRESS_RANGE, PORT_NUMBER_RANGE
 	Stop  string `json:"stop,omitempty"`
+}
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (it *Item) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Type  string          `json:"type"`
+		Value json.RawMessage `json:"value"`
+		Start json.RawMessage `json:"start"`
+		Stop  json.RawMessage `json:"stop"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*it = Item{Type: raw.Type, Value: text(raw.Value), Start: text(raw.Start), Stop: text(raw.Stop)}
+	return nil
+}
+
+// text is a JSON string's value, or any other JSON value as written.
+func text(r json.RawMessage) string {
+	if len(r) == 0 || string(r) == "null" {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(r, &s) == nil {
+		return s
+	}
+	return string(bytes.TrimSpace(r))
 }
 
 // Key identifies an item for comparison; prefixes compare canonically.

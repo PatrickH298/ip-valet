@@ -127,6 +127,8 @@ func newHarness(t *testing.T, ruleSpecs ...string) *harness {
 		now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
 	t.Cleanup(h.api.Close)
 	t.Cleanup(h.ctl.Close)
+	// Real controllers often hold port lists, whose items are numbers.
+	h.ctl.AddPorts("Web ports", []int{443}, []int{8000, 8080})
 	apiURL, _ := url.Parse(h.api.URL)
 	ctlURL, _ := url.Parse(h.ctl.URL)
 	h.cfg = config.Config{APIURL: apiURL, APIKey: workerKey, ControllerURL: ctlURL, ControllerKey: "unifi-key",
