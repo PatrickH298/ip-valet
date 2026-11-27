@@ -11,6 +11,7 @@ package rules
 import (
 	"errors"
 	"fmt"
+	"net/netip"
 	"regexp"
 	"slices"
 	"sort"
@@ -26,14 +27,15 @@ const Wildcard = "*"
 
 // Rule grants matching people a realm.
 type Rule struct {
-	Name   string // from IPVALET_SSO_RULE_<NAME>, for logs
-	Realm  string // an API realm; never *
-	User   string // an IdP user name or *
-	Group  string // an IdP group or *
-	As     string // the group entries carry in the API; defaults to Group
-	MaxTTL TTL    // the longest lifetime a person may ask for
-	TTL    TTL    // the lifetime a one-click registration asks for; at most MaxTTL
-	Manual bool   // the person may type in addresses
+	Name    string // from IPVALET_SSO_RULE_<NAME>, for logs
+	Realm   string // an API realm; never *
+	User    string // an IdP user name or *
+	Group   string // an IdP group or *
+	As      string // the group entries carry in the API; defaults to Group
+	MaxTTL  TTL    // the longest lifetime a person may ask for
+	TTL     TTL    // the lifetime a one-click registration asks for; at most MaxTTL
+	Manual  bool   // the person may type in addresses
+	Private bool   // the person may register private addresses (see IsPrivate)
 }
 
 // Identity is a signed-in person as the IdP describes them.
@@ -45,12 +47,13 @@ type Identity struct {
 // Grant is a realm a person may register addresses in, and the API group
 // the entries carry.
 type Grant struct {
-	Realm  string
-	Group  string // the group the entries carry in the API
-	MaxTTL TTL
-	TTL    TTL
-	Manual bool
-	Rules  []string // the rules that grant it
+	Realm   string
+	Group   string // the group the entries carry in the API
+	MaxTTL  TTL
+	TTL     TTL
+	Manual  bool
+	Private bool
+	Rules   []string // the rules that grant it
 }
 
 // Matches reports whether r takes id, and the API group its entries carry.
@@ -72,7 +75,8 @@ func (r Rule) Matches(id Identity) (string, bool) {
 
 // Grants returns what id may do: one grant per realm. When several rules
 // send someone to the same realm, the most permissive wins: the longest
-// max_ttl and the longest ttl, and manual entry if any of them allows it.
+// max_ttl and the longest ttl, and manual entry and private addresses if
+// any of them allows them.
 // The entries carry the group of the most permissive of those rules: the
 // one with the longest max_ttl, then one that allows manual entry, then the
 // longest ttl, then the first by name. Grants are sorted by realm.
@@ -112,6 +116,7 @@ func Grants(rs []Rule, id Identity) []Grant {
 			g.MaxTTL = Longest(g.MaxTTL, m.rule.MaxTTL)
 			g.TTL = Longest(g.TTL, m.rule.TTL)
 			g.Manual = g.Manual || m.rule.Manual
+			g.Private = g.Private || m.rule.Private
 			g.Rules = append(g.Rules, m.rule.Name)
 		}
 		out = append(out, g)
@@ -156,7 +161,7 @@ func Referenced(rs []Rule, group string) bool {
 // Parse reads a rule from its environment value: space-separated key=value
 // pairs, where a value with spaces is double-quoted. Keys: realm and max_ttl
 // (required); user and group (default *); as (required when group is *);
-// ttl (default max_ttl); manual (default no).
+// ttl (default max_ttl); manual and private (default no).
 func Parse(name, s string) (Rule, error) {
 	r := Rule{Name: name, User: Wildcard, Group: Wildcard}
 	pairs, err := splitPairs(s)
@@ -164,7 +169,7 @@ func Parse(name, s string) (Rule, error) {
 		return r, err
 	}
 	seen := map[string]bool{}
-	var maxTTL, ttl, manual string
+	var maxTTL, ttl, manual, private string
 	for _, kv := range pairs {
 		k, v := kv[0], kv[1]
 		if seen[k] {
@@ -186,8 +191,10 @@ func Parse(name, s string) (Rule, error) {
 			ttl = v
 		case "manual":
 			manual = strings.ToLower(v)
+		case "private":
+			private = strings.ToLower(v)
 		default:
-			return r, fmt.Errorf("unknown key %q (want realm, user, group, as, max_ttl, ttl, manual)", k)
+			return r, fmt.Errorf("unknown key %q (want realm, user, group, as, max_ttl, ttl, manual, private)", k)
 		}
 	}
 	switch {
@@ -220,12 +227,17 @@ func Parse(name, s string) (Rule, error) {
 			return r, fmt.Errorf("ttl %s is longer than max_ttl %s", r.TTL, r.MaxTTL)
 		}
 	}
-	switch manual {
-	case "", "no", "false":
-	case "yes", "true":
-		r.Manual = true
-	default:
-		return r, errors.New("manual must be yes or no")
+	for _, f := range []struct {
+		name, value string
+		dst         *bool
+	}{{"manual", manual, &r.Manual}, {"private", private, &r.Private}} {
+		switch f.value {
+		case "", "no", "false":
+		case "yes", "true":
+			*f.dst = true
+		default:
+			return r, fmt.Errorf("%s must be yes or no", f.name)
+		}
 	}
 	return r, nil
 }
@@ -250,6 +262,27 @@ func ValidName(s string) bool {
 		}
 	}
 	return true
+}
+
+// --- addresses
+
+// privateRanges are the private address ranges: RFC 1918, the shared address
+// space (100.64.0.0/10) and IPv6 unique local addresses (fc00::/7), the same
+// that the UniFi worker counts as private.
+var privateRanges = []netip.Prefix{
+	netip.MustParsePrefix("10.0.0.0/8"), netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.168.0.0/16"), netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("fc00::/7"),
+}
+
+// IsPrivate reports whether p is, or overlaps, a private range.
+func IsPrivate(p netip.Prefix) bool {
+	for _, r := range privateRanges {
+		if r.Overlaps(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // --- lifetimes

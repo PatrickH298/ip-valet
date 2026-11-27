@@ -299,8 +299,8 @@ services:
       # their addresses to one realm; people get every rule that takes them,
       # and someone no rule takes cannot sign in. Rules that send someone to
       # the same realm merge, and the most permissive wins: the longest
-      # max_ttl and ttl, manual entry if any allows it, and the group of the
-      # rule with the longest max_ttl.
+      # max_ttl and ttl, manual entry and private addresses if any allows
+      # them, and the group of the rule with the longest max_ttl.
       #   realm    the realm (required)
       #   user     an IdP user name, or * for any (default *)
       #   group    an IdP group, or * for any (default *)
@@ -309,6 +309,9 @@ services:
       #   max_ttl  the longest a person may keep an address, or unlimited (required)
       #   ttl      how long one click keeps it (default: max_ttl)
       #   manual   yes lets people type in addresses as well (default no)
+      #   private  yes lets people register private addresses (RFC 1918,
+      #            100.64.0.0/10, fc00::/7); the realm's IP rules and the
+      #            worker must accept them too (default no)
       # Quote a value with spaces: group="IT Staff".
       IPVALET_SSO_RULE_STAFF: group=staff realm=default max_ttl=12h
       # IPVALET_SSO_RULE_ADMINS: group=admins realm=default max_ttl=30d ttl=7d manual=yes

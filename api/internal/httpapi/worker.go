@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -239,7 +240,9 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 
 	ctx := r.Context()
 	var applied int64
+	var refused []refusal
 	err := db.InTx(ctx, s.Pool, db.ReadCommitted, func(tx pgx.Tx) error {
+		refused = nil
 		cur, err := db.CurrentRevision(ctx, tx)
 		if err != nil {
 			return err
@@ -281,6 +284,10 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 				p.WorkerID, *req.Revision, generatedAt); err != nil {
 				return err
 			}
+			prev, err := loadWorkerRejections(ctx, tx, p.WorkerID)
+			if err != nil {
+				return err
+			}
 			if _, err := tx.Exec(ctx, `DELETE FROM worker_rejections WHERE worker_id = $1`, p.WorkerID); err != nil {
 				return err
 			}
@@ -292,12 +299,27 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 					return err
 				}
 			}
+			// Workers report every rejection on every sync; only new ones, or
+			// ones whose reason changed, are audited and logged.
+			var fresh []refusal
+			for i, pfx := range rejPrefixes {
+				if old, ok := prev[pfx]; !ok || old != rejCodes[i] {
+					fresh = append(fresh, refusal{prefix: pfx, code: rejCodes[i], detail: rejDetails[i]})
+				}
+			}
+			if refused, err = auditRefusals(ctx, tx, p, *req.Instance, *req.Revision, fresh); err != nil {
+				return err
+			}
 			applied = *req.Revision
 		}
 		return db.Notify(ctx, tx, db.ChannelStatus, p.WorkerID)
 	})
 	if err != nil {
 		return err
+	}
+	for _, f := range refused {
+		s.Log.Info("worker refused an address", "worker_id", p.WorkerID, "worker", f.worker, "prefix", f.prefix.String(),
+			"code", f.code, "detail", derefString(f.detail), "entries", f.entries, "instance", *req.Instance)
 	}
 	kind := "success"
 	if req.Error != nil {
@@ -307,4 +329,93 @@ func (s *Server) workerStatus(w http.ResponseWriter, r *http.Request, p *auth.Pr
 		"kind", kind, "rejected", len(rejPrefixes), "applied_revision", applied)
 	writeJSON(w, http.StatusOK, statusResponse{AppliedRevision: applied})
 	return nil
+}
+
+// refusal is a rejection a worker reported for the first time, or with a new
+// reason.
+type refusal struct {
+	prefix  netip.Prefix
+	code    string
+	detail  *string
+	worker  string // the worker's name
+	entries int    // live entries it refuses
+}
+
+func loadWorkerRejections(ctx context.Context, tx pgx.Tx, workerID string) (map[netip.Prefix]string, error) {
+	rows, err := tx.Query(ctx, `SELECT prefix, code FROM worker_rejections WHERE worker_id = $1`, workerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[netip.Prefix]string{}
+	for rows.Next() {
+		var pfx netip.Prefix
+		var code string
+		if err := rows.Scan(&pfx, &code); err != nil {
+			return nil, err
+		}
+		out[pfx] = code
+	}
+	return out, rows.Err()
+}
+
+// auditRefusals writes an entry.reject audit row for each live entry a new
+// rejection refuses: the worker, its code and its detail. A rejection that
+// matches no live entry is audited against the worker alone.
+func auditRefusals(ctx context.Context, tx pgx.Tx, p *auth.Principal, instance string, rev int64,
+	fresh []refusal) ([]refusal, error) {
+	if len(fresh) == 0 {
+		return nil, nil
+	}
+	var name string
+	if err := tx.QueryRow(ctx, `SELECT name FROM workers WHERE id = $1`, p.WorkerID).Scan(&name); err != nil {
+		return nil, err
+	}
+	prefixes := make([]netip.Prefix, len(fresh))
+	for i, f := range fresh {
+		prefixes[i] = f.prefix
+	}
+	entries, err := db.QueryEntries(ctx, tx, `SELECT `+db.EntryCols+` FROM entries e JOIN workers t ON t.id = $1
+		WHERE e.deleted_at IS NULL AND (e.expires_at IS NULL OR e.expires_at > now())
+		  AND e.prefix = ANY($2::cidr[]) AND `+db.WorkerMatchesEntry+`
+		ORDER BY e.created_at, e.id`, p.WorkerID, prefixes)
+	if err != nil {
+		return nil, err
+	}
+	for i := range fresh {
+		f := &fresh[i]
+		f.worker = name
+		details := map[string]any{"worker_id": p.WorkerID, "worker": name, "code": f.code, "revision": rev,
+			"instance": instance}
+		if f.detail != nil {
+			details["detail"] = *f.detail
+		}
+		for j := range entries {
+			e := &entries[j]
+			if e.Prefix != f.prefix {
+				continue
+			}
+			f.entries++
+			if err := db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "entry.reject", ObjectType: "entry",
+				ObjectID: e.ID, Realm: &e.Realm, User: &e.User, Group: &e.Group, Prefix: &e.Prefix,
+				Details: details}); err != nil {
+				return nil, err
+			}
+		}
+		if f.entries == 0 {
+			pfx := f.prefix
+			if err := db.InsertAudit(ctx, tx, db.Audit{Actor: p.Actor, Action: "entry.reject", ObjectType: "worker",
+				ObjectID: p.WorkerID, Prefix: &pfx, Details: details}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return fresh, nil
+}
+
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }

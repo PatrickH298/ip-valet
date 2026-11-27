@@ -37,7 +37,7 @@ the API group its entries carry, lifetimes and a manual-entry flag:
 - A person gets every rule that takes them. Rules that send someone to the
   same realm merge, and the most permissive wins:
   - the longest `max_ttl` and `ttl`;
-  - manual entry if any rule allows it;
+  - manual entry, and private addresses, if any rule allows them;
   - the group of the rule with the longest `max_ttl` (on a tie: manual entry,
     then the longest `ttl`, then the name).
 
@@ -53,6 +53,23 @@ Rules live in the environment, like the UniFi worker's, so they are reviewed
 and deployed with the rest of the configuration.
 
 ## Registering
+
+**Private addresses** are refused unless a grant allows them (`private=yes`;
+merged like manual entry, so any rule for the realm that allows them does).
+Private means RFC 1918, `100.64.0.0/10` and `fc00::/7`, the ranges the UniFi
+worker treats as private. A subnet that overlaps one counts.
+
+**Live states.** After registering, entries read "Being applied" until each
+worker reports applying them. A second script polls `/status` (a JSON list
+of the person's entries and their states, behind the session) every three
+seconds while any entry is still being applied or removed, for at most five
+minutes, and updates the page in place.
+
+**Why a worker refused.** The page explains each worker code in words
+("is not set up to take this address", "does not accept this kind of
+address"), not the worker's detail, which can name its rules. The detail is
+kept for administrators: the API writes an `entry.reject` audit row for each
+entry a new rejection refuses, and the UniFi worker logs it.
 
 One click registers each detected address in every grant, for the grant's
 `ttl`. Manual entry registers one typed address or subnet in the grants that
@@ -140,6 +157,7 @@ while it is unset, and logs once when an untrusted peer sends the header.
   - A new session id is made at every sign-in.
   - `next` targets are restricted to paths on the site.
 - **Content-Security-Policy:** `default-src 'none'`; styles and scripts from
-  the site only; `connect-src` only the detection hosts; `form-action` the
-  site, plus the logout URL's origin when one is set.
+  the site only; `connect-src` the site itself (for `/status`) and the
+  detection hosts; `form-action` the site, plus the logout URL's origin when
+  one is set.
 - **Container:** distroless, non-root, no writable filesystem, any uid:gid.

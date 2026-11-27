@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -164,6 +165,28 @@ func (h *harness) sync() Result {
 }
 
 func (h *harness) items(list string) string { return strings.Join(h.ctl.Items(list), " ") }
+
+// Each refusal is logged once, with its reason, not on every sync.
+func TestRejectionsAreLoggedOnce(t *testing.T) {
+	h := newHarness(t, "realm=home ipv4_list=home-v4 ipv6_list=home-v6")
+	var logs bytes.Buffer
+	h.w.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	h.api.set(3, e("192.168.1.10/32", "home", "ann", "staff", nil), e("8.8.8.8/32", "home", "ann", "staff", nil))
+	h.sync()
+	h.sync()
+	got := strings.Count(logs.String(), `msg="address refused"`)
+	if got != 1 || !strings.Contains(logs.String(), `prefix=192.168.1.10/32 code=address_not_allowed detail="rule R0 takes only public addresses; this one is private"`) {
+		t.Fatalf("%d log lines:\n%s", got, logs.String())
+	}
+	// Accepted, then refused again: logged again.
+	h.api.set(4, e("8.8.8.8/32", "home", "ann", "staff", nil))
+	h.sync()
+	h.api.set(5, e("192.168.1.10/32", "home", "ann", "staff", nil))
+	h.sync()
+	if got := strings.Count(logs.String(), `msg="address refused"`); got != 2 {
+		t.Fatalf("%d log lines:\n%s", got, logs.String())
+	}
+}
 
 func TestSyncPlacesAndReports(t *testing.T) {
 	h := newHarness(t,

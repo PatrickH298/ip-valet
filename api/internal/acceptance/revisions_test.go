@@ -332,6 +332,71 @@ func TestStatusReports(t *testing.T) {
 	}
 }
 
+// A worker's refusal is audited against the entries it refuses, once: a
+// worker repeats its rejections on every sync.
+func TestRejectionsAreAudited(t *testing.T) {
+	t.Parallel()
+	h := testutil.New(t, nil)
+	s := h.Basic("r")
+	submitOK(h, s.ClientKey, sub("ann", "8.8.8.8", "1d", "staff", "lab"))
+	submitOK(h, s.ClientKey, sub("bob", "8.8.4.4", "1d", "staff"))
+	gen := h.DesiredState(s.WorkerKey).JSON(t)["generated_at"].(string)
+	report := func(rejected ...map[string]any) {
+		if rejected == nil {
+			rejected = []map[string]any{}
+		}
+		h.Must(200, "POST", "/v1/worker/status", s.WorkerKey, map[string]any{"instance": "w1", "revision": 2,
+			"generated_at": gen, "rejected": rejected})
+	}
+	audit := func() []map[string]any {
+		var out []map[string]any
+		for _, it := range h.Admin(200, "GET", "/v1/admin/audit?action=entry.reject", nil)["items"].([]any) {
+			out = append(out, it.(map[string]any))
+		}
+		return out
+	}
+	private := map[string]any{"prefix": "8.8.8.8", "code": "no_matching_rule", "detail": "no rule takes this address"}
+
+	// One row per refused entry: ann's address is in two groups.
+	report(private)
+	rows := audit()
+	if len(rows) != 2 {
+		t.Fatalf("%d rows: %v", len(rows), rows)
+	}
+	for _, r := range rows {
+		d := r["details"].(map[string]any)
+		if r["object_type"] != "entry" || r["realm"] != "r" || r["user"] != "ann" || r["prefix"] != "8.8.8.8/32" ||
+			d["code"] != "no_matching_rule" || d["detail"] != private["detail"] || d["worker"] != "home-r" ||
+			d["worker_id"] != s.WorkerID || d["instance"] != "w1" {
+			t.Fatalf("%v", r)
+		}
+	}
+	// The same rejection again is not audited again.
+	report(private)
+	if n := len(audit()); n != 2 {
+		t.Fatalf("repeat audited: %d rows", n)
+	}
+	// A new reason is.
+	report(map[string]any{"prefix": "8.8.8.8", "code": "address_not_allowed"})
+	if n := len(audit()); n != 4 {
+		t.Fatalf("changed code: %d rows", n)
+	}
+	// A rejection that matches no live entry is audited against the worker.
+	report(map[string]any{"prefix": "8.8.8.8", "code": "address_not_allowed"},
+		map[string]any{"prefix": "9.9.9.9", "code": "invalid"})
+	rows = audit()
+	if len(rows) != 5 || rows[0]["object_type"] != "worker" || rows[0]["object_id"] != s.WorkerID ||
+		rows[0]["prefix"] != "9.9.9.9/32" || rows[0]["realm"] != nil {
+		t.Fatalf("%v", rows[0])
+	}
+	// Accepted, then refused again: audited again.
+	report()
+	report(private)
+	if n := len(audit()); n != 7 {
+		t.Fatalf("refused again: %d rows", n)
+	}
+}
+
 func TestAppliedStates(t *testing.T) {
 	t.Parallel()
 	h := testutil.New(t, nil)

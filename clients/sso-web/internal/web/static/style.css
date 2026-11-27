@@ -190,3 +190,7 @@ li.registration { background: var(--panel); border: 1px solid var(--line); borde
 ul.places { list-style: none; padding: 0; margin: 0.5rem 0 0; }
 ul.places li { padding: 0.3rem 0; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem; }
 ul.places li small { flex-basis: 100%; }
+.addr-cell { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.5rem; min-width: 0; }
+.tag { font-size: 0.75rem; padding: 0 0.4rem; border-radius: 999px; color: var(--off); background: var(--off-bg); }
+.tag[hidden] { display: none; }
+ul.places li small.detail:empty { display: none; }

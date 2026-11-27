@@ -93,6 +93,30 @@ func TestParseManual(t *testing.T) {
 	}
 }
 
+func TestWorkerDetail(t *testing.T) {
+	e := ipvalet.Entry{Prefix: "2a00:1450::/64", State: "partial", Workers: []ipvalet.WorkerState{
+		{Label: "Home", State: "active"},
+		{Label: "Office", State: "rejected", Code: "family_unsupported"},
+		{Label: "Lab", State: "rejected", Code: "something_new"},
+	}}
+	if got := workerDetail(e); got != "Office does not take IPv6 addresses. Lab did not accept it (something_new)." {
+		t.Fatal(got)
+	}
+	e.State = "active"
+	if got := workerDetail(e); got != "" {
+		t.Fatal(got)
+	}
+	for code, want := range map[string]string{
+		"prefix_too_broad": "does not accept a subnet this wide", "address_not_allowed": "does not accept this kind of address",
+		"capacity_exceeded": "is full", "no_matching_rule": "is not set up to take this address",
+		"invalid": "could not use this address", "": "did not accept it",
+	} {
+		if got := workerReason(code, "IPv4"); got != want {
+			t.Errorf("%s: %q", code, got)
+		}
+	}
+}
+
 func TestExplain(t *testing.T) {
 	s := &Server{Options: Options{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}}
 	two, thirtyTwo := 2, 32

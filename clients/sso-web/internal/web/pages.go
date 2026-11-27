@@ -3,6 +3,7 @@ package web
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/netip"
@@ -129,6 +130,7 @@ type slot struct {
 	Family    string // ipv4 or ipv6
 	Label     string // IPv4 or IPv6
 	Addr      string // detected so far; "" = not yet
+	Private   bool   // Addr is a private address
 	DetectURL string // the script asks this host for the address
 	Field     string // the subnet field's name
 	Subnets   []int
@@ -140,9 +142,11 @@ type grantView struct {
 	TTL         string
 	Manual      bool
 	ManualLimit string // how long typed-in addresses may be kept
+	Private     bool   // private addresses are accepted
 }
 
 type placeView struct {
+	ID         string // the entry, for live updates
 	Where      string
 	State      string
 	StateLabel string
@@ -187,11 +191,12 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, sess Session, gran
 		Subnets: subnets(32, s.MaxSubnetV4, s.DefaultSubnetV4), Default: s.DefaultSubnetV4}
 	v.V6 = slot{Family: "ipv6", Label: "IPv6", Field: "subnet_v6",
 		Subnets: subnets(128, s.MaxSubnetV6, s.DefaultSubnetV6), Default: s.DefaultSubnetV6}
+	private := conn.IsValid() && rules.IsPrivate(netip.PrefixFrom(conn, conn.BitLen()))
 	switch {
 	case conn.Is4():
-		v.V4.Addr = conn.String()
+		v.V4.Addr, v.V4.Private = conn.String(), private
 	case conn.Is6():
-		v.V6.Addr = conn.String()
+		v.V6.Addr, v.V6.Private = conn.String(), private
 	}
 	if v.V4.Addr == "" && s.DetectV4 != nil {
 		v.V4.DetectURL = s.DetectV4.String()
@@ -203,7 +208,7 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, sess Session, gran
 	var auto []string
 	for _, g := range grants {
 		auto = append(auto, "in "+where(g.Realm, g.Group)+" for "+g.TTL.Human())
-		gv := grantView{Where: where(g.Realm, g.Group), TTL: g.TTL.Human(), Manual: g.Manual}
+		gv := grantView{Where: where(g.Realm, g.Group), TTL: g.TTL.Human(), Manual: g.Manual, Private: g.Private}
 		if g.MaxTTL.Unlimited {
 			gv.ManualLimit = "with no time limit"
 		} else {
@@ -224,6 +229,32 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request, sess Session, gran
 	}
 	v.Addresses, v.ListError = s.addresses(r.Context(), sess.User, grants)
 	s.render(w, http.StatusOK, "home", "Your addresses", sess.User, v)
+}
+
+type statusEntry struct {
+	ID     string `json:"id"`
+	State  string `json:"state"`
+	Label  string `json:"label"`
+	Detail string `json:"detail"`
+}
+
+// status answers GET /status with the state of each of the person's
+// entries, for the page's script to update itself while workers apply them.
+func (s *Server) status(w http.ResponseWriter, r *http.Request, sess Session, grants []rules.Grant) {
+	addrs, problem := s.addresses(r.Context(), sess.User, grants)
+	w.Header().Set("Content-Type", "application/json")
+	if problem != "" {
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": problem})
+		return
+	}
+	entries := []statusEntry{}
+	for _, a := range addrs {
+		for _, p := range a.Places {
+			entries = append(entries, statusEntry{ID: p.ID, State: p.State, Label: p.StateLabel, Detail: p.Detail})
+		}
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"entries": entries})
 }
 
 // addresses lists the person's live entries in the realms they may use,
@@ -249,22 +280,10 @@ func (s *Server) addresses(ctx context.Context, user string, grants []rules.Gran
 			if e.UpdatedAt.After(a.updated) {
 				a.updated = e.UpdatedAt
 			}
-			p := placeView{Where: where(e.Realm, e.Group), State: e.State, StateLabel: stateLabel(e.State),
-				Expires: "No time limit"}
+			p := placeView{ID: e.ID, Where: where(e.Realm, e.Group), State: e.State, StateLabel: stateLabel(e.State),
+				Expires: "No time limit", Detail: workerDetail(e)}
 			if e.ExpiresAt != nil {
 				p.Expires = "Until " + s.when(*e.ExpiresAt)
-			}
-			// Per-worker detail helps only when the workers disagree.
-			if e.State == "partial" || e.State == "rejected" {
-				var parts []string
-				for _, wk := range e.Workers {
-					part := wk.Label + ": " + stateLabel(wk.State)
-					if wk.Code != "" {
-						part += " (" + wk.Code + ")"
-					}
-					parts = append(parts, part)
-				}
-				p.Detail = strings.Join(parts, "; ")
 			}
 			a.Places = append(a.Places, p)
 		}
@@ -296,6 +315,45 @@ func placeNamer(grants []rules.Grant) func(realm, group string) string {
 		}
 		return realm + " (" + group + ")"
 	}
+}
+
+// workerDetail says why workers refused an entry, when some did.
+func workerDetail(e ipvalet.Entry) string {
+	if e.State != "partial" && e.State != "rejected" {
+		return ""
+	}
+	family := "IPv4"
+	if p, err := netip.ParsePrefix(e.Prefix); err == nil && p.Addr().Is6() {
+		family = "IPv6"
+	}
+	var parts []string
+	for _, wk := range e.Workers {
+		if wk.State == "rejected" {
+			parts = append(parts, wk.Label+" "+workerReason(wk.Code, family)+".")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// workerReason explains a worker's rejection code in words.
+func workerReason(code, family string) string {
+	switch code {
+	case "prefix_too_broad":
+		return "does not accept a subnet this wide"
+	case "address_not_allowed":
+		return "does not accept this kind of address"
+	case "family_unsupported":
+		return "does not take " + family + " addresses"
+	case "capacity_exceeded":
+		return "is full"
+	case "no_matching_rule":
+		return "is not set up to take this address"
+	case "invalid":
+		return "could not use this address"
+	case "":
+		return "did not accept it"
+	}
+	return "did not accept it (" + code + ")"
 }
 
 func stateLabel(state string) string {

@@ -68,16 +68,15 @@ func New(o Options) (*Server, error) {
 	if s.pages, err = parseTemplates(); err != nil {
 		return nil, err
 	}
-	connect := "'none'"
-	var origins []string
+	// The page's scripts fetch /status here, and addresses from the
+	// detection hosts.
+	origins := []string{"'self'"}
 	for _, u := range []*url.URL{o.DetectV4, o.DetectV6} {
 		if u != nil {
 			origins = append(origins, u.Scheme+"://"+u.Host)
 		}
 	}
-	if len(origins) > 0 {
-		connect = strings.Join(origins, " ")
-	}
+	connect := strings.Join(origins, " ")
 	forms := "'self'"
 	if o.LogoutURL != nil {
 		// form-action also covers where a form's response redirects.
@@ -99,6 +98,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /signed-out", s.signedOut)
 	s.Provider.Routes(mux)
 	mux.Handle("GET /{$}", s.withSession(s.home))
+	mux.Handle("GET /status", s.withSession(s.status))
 	mux.Handle("POST /register", s.withSession(s.registerDetected))
 	mux.Handle("POST /register/manual", s.withSession(s.registerManual))
 	mux.Handle("POST /revoke", s.withSession(s.revoke))

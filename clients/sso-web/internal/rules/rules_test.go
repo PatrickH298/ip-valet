@@ -1,6 +1,7 @@
 package rules
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -81,6 +82,32 @@ func TestGrants(t *testing.T) {
 	// Without the any-group rule, someone who matches nothing gets nothing.
 	if gs := Grants(rs[:3], Identity{User: "eve", Groups: []string{"c"}}); len(gs) != 0 {
 		t.Fatalf("%+v", gs)
+	}
+}
+
+func TestPrivate(t *testing.T) {
+	r := mustParse(t, "LAN", `group=lan realm=office max_ttl=1d private=yes`)
+	if !r.Private || mustParse(t, "X", `group=x realm=office max_ttl=1d`).Private {
+		t.Fatal("private")
+	}
+	if _, err := Parse("X", `group=x realm=office max_ttl=1d private=sometimes`); err == nil ||
+		!strings.Contains(err.Error(), "private must be yes or no") {
+		t.Fatal(err)
+	}
+	// Merged like manual: allowed if any rule for the realm allows it.
+	gs := Grants([]Rule{r, mustParse(t, "STAFF", `group=staff realm=office max_ttl=7d`)},
+		Identity{User: "x", Groups: []string{"lan", "staff"}})
+	if len(gs) != 1 || !gs[0].Private || gs[0].Group != "staff" {
+		t.Fatalf("%+v", gs)
+	}
+	for in, want := range map[string]bool{
+		"10.1.2.3/32": true, "172.31.0.0/24": true, "192.168.1.0/24": true, "100.64.0.1/32": true,
+		"fd12::/64": true, "fc00::1/128": true, "8.0.0.0/6": true, // overlaps 10.0.0.0/8
+		"8.8.8.8/32": false, "172.32.0.1/32": false, "2a00:1450::/64": false, "127.0.0.1/32": false,
+	} {
+		if got := IsPrivate(netip.MustParsePrefix(in)); got != want {
+			t.Errorf("%s: %v", in, got)
+		}
 	}
 }
 

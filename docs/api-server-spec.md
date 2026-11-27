@@ -262,7 +262,7 @@ CREATE TABLE audit_log (
   at          timestamptz NOT NULL DEFAULT now(),
   actor       text NOT NULL,   -- key id, 'admin:env' or 'system'
   client_id   uuid,
-  action      text NOT NULL,   -- e.g. entry.create, entry.replace, entry.shorten, rule.update
+  action      text NOT NULL,   -- e.g. entry.create, entry.replace, entry.shorten, entry.reject, rule.update
   object_type text NOT NULL,
   object_id   text,
   realm       text,
@@ -570,6 +570,7 @@ Or, on failure: `{ "instance": "unifi-1", "version": "0.3.0", "revision": 1842, 
   - At most 200 `rejected` items, each with a valid prefix and a code from the worker codes in Errors; `detail` is at most 200 characters. The first item for a prefix wins. At these limits the largest report is about 59 KB, inside the default 64 KiB body limit.
 - Always: set `last_seen_at = now()`, `last_instance` and `last_version`.
 - Success with `revision ≥ applied_revision`: set `applied_revision = revision` and `applied_generated_at = greatest(applied_generated_at, generated_at)`, then replace all of the worker's `worker_rejections` with the reported list (stored with `revision`).
+- A rejection that is new, or whose code changed, is audited in the same transaction: one `entry.reject` row per live, unexpired entry with that prefix that the worker matches. The row carries the entry's realm, user, group and prefix, and `details` with `worker_id`, `worker` (name), `code`, `detail`, `revision` and `instance`. A rejection that matches no live entry gets one row against the worker (`object_type` `worker`). Workers repeat their rejections on every sync, so an unchanged one writes nothing; the API also logs each new one at info level.
 - Success with `revision < applied_revision`: a stale report. Change nothing but the "always" fields.
 - Error: set `last_error` and `last_error_at`; leave the applied fields and rejections alone.
 - Then `NOTIFY ipvalet_status, '<worker id>'` and respond 200 `{ "applied_revision": <value now stored> }`. Do not audit status reports; log them at debug level.

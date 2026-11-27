@@ -15,7 +15,8 @@
       {{- range $s := list .V4 .V6}}
       <div class="addr-row" data-family="{{$s.Family}}"{{if $s.DetectURL}} data-detect-url="{{$s.DetectURL}}"{{end}}>
         <span class="family">{{$s.Label}}</span>
-        <code class="addr">{{if $s.Addr}}{{$s.Addr}}{{else}}Not detected{{end}}</code>
+        <span class="addr-cell"><code class="addr">{{if $s.Addr}}{{$s.Addr}}{{else}}Not detected{{end}}</code>
+          <span class="tag private-tag"{{if not $s.Private}} hidden{{end}}>private</span></span>
         <label class="subnet">Subnet
           <select name="{{$s.Field}}"{{if not $s.Addr}} disabled{{end}}>
             {{- range $s.Subnets}}<option value="{{.}}"{{if eq . $s.Default}} selected{{end}}>/{{.}}</option>{{end}}
@@ -65,11 +66,11 @@
       </div>
       <ul class="places">
         {{- range .Places}}
-        <li>
+        <li data-entry="{{.ID}}" data-state="{{.State}}">
           <strong>{{.Where}}</strong>
           <span class="badge state-{{.State}}">{{.StateLabel}}</span>
           <span class="muted">{{.Expires}}</span>
-          {{- if .Detail}}<small class="muted">{{.Detail}}</small>{{end}}
+          <small class="muted detail">{{.Detail}}</small>
         </li>
         {{- end}}
       </ul>
@@ -83,9 +84,10 @@
   <h2>Where your addresses go</h2>
   <ul class="plain">
     {{- range .Grants}}
-    <li><strong>{{.Where}}</strong>: one click keeps addresses for {{.TTL}}{{if .Manual}}; you may also enter addresses, kept {{.ManualLimit}}{{end}}.</li>
+    <li><strong>{{.Where}}</strong>: one click keeps addresses for {{.TTL}}{{if .Manual}}; you may also enter addresses, kept {{.ManualLimit}}{{end}}{{if .Private}}. Private addresses are accepted{{end}}.</li>
     {{- end}}
   </ul>
 </section>
 <script src="/static/detect.js"></script>
+<script src="/static/status.js"></script>
 {{end}}
